@@ -1,12 +1,23 @@
 {
-  "name": "26-fiap-mobile-cp4",
+  "name": "cp4-chat",
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~57.0.16",
+    "expo-apple-authentication": "~57.0.1",
+    "expo-auth-session": "~57.0.9",
+    "expo-constants": "~57.0.14",
+    "expo-crypto": "~57.0.2",
+    "expo-image-picker": "~57.0.13",
     "expo-status-bar": "~57.0.1",
+    "expo-web-browser": "~57.0.2",
+    "firebase": "^12.18.0",
     "react": "19.2.3",
-    "react-native": "0.86.2"
+    "react-dom": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-web": "^0.21.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
@@ -14,9 +25,14 @@
   },
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web"
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "rules:deploy": "firebase deploy --only database,storage --project fiap-mobile-e8e61",
+    "rules:verify": "node scripts/verify-rules.mjs",
+    "rules:verify:storage": "node scripts/verify-storage-rules.mjs",
+    "rules:clean": "firebase database:remove / --project fiap-mobile-e8e61 --force"
   },
   "private": true
 }
