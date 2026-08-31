@@ -7,7 +7,6 @@ em tempo real.
 ## 👥 Integrantes
 
 - RM554981 - Bruno Dominicheli
-- RM555528 - Gabriel Gouvea
 - RM556198 - Miguel Kapicius
 - RM555608 - Thiago Ferreira
 
