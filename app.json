@@ -2,48 +2,63 @@
   "expo": {
     "name": "CP4 Chat",
     "slug": "cp4-chat",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
+    "scheme": "cp4chat",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.fiap.cp4chat",
-      "usesAppleSignIn": true,
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "entitlements": {
+        "aps-environment": "development"
+      },
       "infoPlist": {
-        "CFBundleURLTypes": [
-          {
-            "CFBundleURLSchemes": [
-              "com.googleusercontent.apps.766438180232-qmiispriu8narf4g243v5d42rpokq4c6"
-            ]
-          }
-        ]
+        "UIBackgroundModes": ["remote-notification"]
       }
     },
     "android": {
+      "package": "com.fiap.cp4chat",
+      "googleServicesFile": "./google-services.json",
+      "permissions": ["android.permission.POST_NOTIFICATIONS"],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false,
-      "package": "com.fiap.cp4chat"
+      "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-web-browser",
-      "expo-apple-authentication",
+      [
+        "@react-native-firebase/app",
+        {
+          "ios": {
+            "disableSPM": true
+          }
+        }
+      ],
+      "@react-native-firebase/messaging",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "useFrameworks": "static",
+            "forceStaticLinking": ["RNFBApp", "RNFBMessaging"]
+          }
+        }
+      ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "O app acessa suas fotos para você escolher uma imagem de perfil.",
-          "cameraPermission": "O app usa a câmera para você tirar uma nova foto de perfil."
+          "photosPermission": "O app acessa suas fotos para você escolher a foto do perfil ou do grupo.",
+          "cameraPermission": "O app usa a câmera para você tirar a foto do perfil ou do grupo."
         }
       ]
-    ],
-    "scheme": "cp4chat"
+    ]
   }
 }

@@ -12,13 +12,33 @@ export class AppError extends Error {
 
 export const createAppError = (message: string): AppError => new AppError(message);
 
+/**
+ * Error returned by the team's API: a stable machine `code` (used by the UI
+ * to pick a state, e.g. GROUP_FULL) plus a pt-BR message authored by the
+ * server and safe to display.
+ */
+export class ApiError extends AppError {
+  readonly code: string;
+  readonly status: number;
+
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
+export const isApiError = (error: unknown, code?: string): error is ApiError =>
+  error instanceof ApiError && (code === undefined || error.code === code);
+
 const GENERIC_MESSAGE = 'Ocorreu um erro inesperado. Tente novamente.';
 
 const NETWORK_MESSAGE = 'Falha de rede. Verifique sua conexão com a internet.';
 
 const PERMISSION_MESSAGE =
-  'Permissão negada pelo banco de dados. Verifique sua conexão, a data e a hora do ' +
-  'aparelho e se você pode conversar com este contato.';
+  'Você não tem permissão para acessar estes dados. Se foi removido de um grupo, ' +
+  'ele não está mais disponível para você.';
 
 const MESSAGES: Readonly<Record<string, string>> = {
   'auth/invalid-email': 'E-mail inválido. Verifique o endereço digitado.',
@@ -33,15 +53,21 @@ const MESSAGES: Readonly<Record<string, string>> = {
   'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos e tente novamente.',
   'auth/network-request-failed': NETWORK_MESSAGE,
   'auth/operation-not-allowed':
-    'Este provedor de login não está habilitado no console do Firebase. Habilite-o em Authentication > Sign-in method.',
-  'auth/configuration-not-found':
-    'Configuração de autenticação não encontrada: o provedor não está habilitado no console do Firebase (Authentication > Sign-in method).',
-  'auth/popup-closed-by-user': 'Login cancelado antes da conclusão.',
-  'auth/account-exists-with-different-credential':
-    'Já existe uma conta com este e-mail usando outro método de login.',
+    'O login por e-mail e senha não está habilitado no Firebase (Authentication > Sign-in method).',
   'auth/requires-recent-login': 'Sessão expirada. Entre novamente para continuar.',
   'auth/internal-error': 'Erro interno na autenticação. Tente novamente em instantes.',
+  'auth/user-token-expired': 'Sessão expirada. Entre novamente.',
+  'auth/invalid-user-token': 'Sessão expirada. Entre novamente.',
   PERMISSION_DENIED: PERMISSION_MESSAGE,
+  'permission-denied': PERMISSION_MESSAGE,
+  unauthenticated: 'Sessão expirada. Entre novamente.',
+  unavailable: NETWORK_MESSAGE,
+  'deadline-exceeded': 'O servidor demorou para responder. Tente novamente.',
+  'resource-exhausted': 'Muitas solicitações em sequência. Aguarde um pouco e tente novamente.',
+  'storage/unauthorized': 'Sem permissão para enviar esta imagem.',
+  'storage/canceled': 'Envio da imagem cancelado.',
+  'storage/retry-limit-exceeded': 'Não foi possível enviar a imagem. Verifique sua conexão.',
+  'storage/quota-exceeded': 'Limite de armazenamento atingido. Tente novamente mais tarde.',
   ERR_REQUEST_CANCELED: 'Solicitação cancelada.',
   ERR_CANCELED: 'Solicitação cancelada.',
 };

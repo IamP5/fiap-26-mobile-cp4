@@ -14,7 +14,10 @@ import {
 
 import { useTheme, useThemedStyles } from '../theme/ThemeContext';
 import { androidRipple, interaction, layout, maxFontScale, radius, spacing, type Theme } from '../theme/theme';
+import type { MessageTarget, OutgoingMessage } from '../types/chat';
+import type { PublicProfile } from '../types/user';
 import { Icon } from './Icon';
+import { MemberPickerModal } from './MemberPickerModal';
 
 export type ChatInputProps = {
   /**
@@ -23,11 +26,16 @@ export type ChatInputProps = {
    * the draft can be cleared the instant the user taps send instead of
    * waiting on a promise to know whether to restore it.
    */
-  onSend: (text: string) => void;
+  onSend: (message: OutgoingMessage) => void;
   disabled?: boolean;
+  /** Other members of a group chat: enables @mentions and choosing a
+   * recipient. Undefined in direct chats. */
+  members?: readonly PublicProfile[];
 };
 
-export const MAX_LENGTH = 1000;
+export const MAX_LENGTH = 2000;
+
+type PickerMode = 'mention' | 'target' | null;
 
 const COUNTER_THRESHOLD: number = MAX_LENGTH * 0.9;
 const BASE_MAX_HEIGHT = 120;
@@ -37,10 +45,34 @@ const INPUT_MIN_HEIGHT = 40;
 const INPUT_LINE_HEIGHT = 21;
 const INPUT_VERTICAL_PADDING: number = (INPUT_MIN_HEIGHT - INPUT_LINE_HEIGHT) / 2;
 
-export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled = false }: ChatInputProps) => {
+export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled = false, members }: ChatInputProps) => {
   const { colors } = useTheme();
   const styles = useThemedStyles(createStyles);
   const [draft, setDraft] = useState<string>('');
+  const [mentioned, setMentioned] = useState<PublicProfile[]>([]);
+  const [target, setTarget] = useState<PublicProfile | null>(null);
+  const [picker, setPicker] = useState<PickerMode>(null);
+  const isGroup: boolean = members !== undefined;
+
+  // A member who left the group can no longer be targeted.
+  useEffect(() => {
+    if (target !== null && members !== undefined && !members.some((m) => m.uid === target.uid)) {
+      setTarget(null);
+    }
+  }, [members, target]);
+
+  const handlePick = useCallback(
+    (member: PublicProfile | null): void => {
+      if (picker === 'target') {
+        setTarget(member);
+      } else if (member !== null) {
+        setMentioned((prev: PublicProfile[]) => (prev.some((m) => m.uid === member.uid) ? prev : [...prev, member]));
+        setDraft((prev: string) => `${prev}${prev.length === 0 || prev.endsWith(' ') ? '' : ' '}@${member.name} `);
+      }
+      setPicker(null);
+    },
+    [picker],
+  );
 
   const trimmed: string = useMemo(() => draft.trim(), [draft]);
   const canSend: boolean = trimmed.length > 0 && !disabled;
@@ -71,12 +103,19 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled = false }
     if (value.length === 0 || disabled) {
       return;
     }
-    onSend(value);
+    // Only mentions still present in the text count.
+    const mentionedUserIds: string[] = mentioned
+      .filter((member: PublicProfile) => value.includes(`@${member.name}`))
+      .map((member: PublicProfile) => member.uid);
+    const messageTarget: MessageTarget =
+      target === null ? { type: 'conversation' } : { type: 'member', memberId: target.uid };
+    onSend({ text: value, target: messageTarget, mentionedUserIds });
     setDraft('');
+    setMentioned([]);
     // The programmatic clear does not fire onContentSizeChange on web, so the
     // pill must collapse back to one line explicitly.
     setInputHeight(INPUT_MIN_HEIGHT);
-  }, [draft, disabled, onSend]);
+  }, [draft, disabled, onSend, mentioned, target]);
 
   const showCounter: boolean = draft.length > COUNTER_THRESHOLD;
   const atCap: boolean = draft.length >= MAX_LENGTH;
@@ -119,7 +158,46 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled = false }
           </Text>
         </View>
       ) : null}
+      {isGroup ? (
+        <View style={styles.toolbar}>
+          <Pressable
+            onPress={() => setPicker('target')}
+            disabled={disabled}
+            accessibilityRole="button"
+            accessibilityLabel={`Destinatário: ${target === null ? 'todos do grupo' : target.name}. Toque para alterar.`}
+            style={({ pressed }: { pressed: boolean }) => [
+              styles.chip,
+              target !== null ? styles.chipActive : null,
+              pressed ? styles.sendSlotPressed : null,
+            ]}
+          >
+            <Text style={[styles.chipText, target !== null ? styles.chipTextActive : null]} numberOfLines={1}>
+              Para: {target === null ? 'Todos' : target.name}
+            </Text>
+            <Icon name="chevron-down" size={10} color={target !== null ? colors.onPrimary : colors.muted} />
+          </Pressable>
+          {target !== null ? (
+            <Pressable onPress={() => setTarget(null)} hitSlop={8} accessibilityRole="button" accessibilityLabel="Enviar para todos">
+              <Icon name="close" size={12} color={colors.muted} />
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
       <View style={styles.row}>
+        {isGroup ? (
+          <Pressable
+            onPress={() => setPicker('mention')}
+            disabled={disabled}
+            accessibilityRole="button"
+            accessibilityLabel="Mencionar integrante"
+            android_ripple={androidRipple(colors.ripple, true)}
+            style={({ pressed }: { pressed: boolean }) => [styles.mentionSlot, pressed ? styles.sendSlotPressed : null]}
+          >
+            <Text style={styles.mentionGlyph} maxFontSizeMultiplier={maxFontScale.chrome}>
+              @
+            </Text>
+          </Pressable>
+        ) : null}
         <TextInput
           style={[styles.input, { height: inputHeight }, disabled ? styles.inputDisabled : null]}
           onContentSizeChange={handleContentSizeChange}
@@ -166,6 +244,17 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled = false }
           </Animated.View>
         </Pressable>
       </View>
+      {isGroup ? (
+        <MemberPickerModal
+          visible={picker !== null}
+          title={picker === 'target' ? 'Enviar mensagem para' : 'Mencionar integrante'}
+          members={members ?? []}
+          allowEveryone={picker === 'target'}
+          selectedUid={picker === 'target' ? (target?.uid ?? null) : undefined}
+          onSelect={handlePick}
+          onClose={() => setPicker(null)}
+        />
+      ) : null}
     </View>
   );
 };
@@ -190,6 +279,44 @@ const createStyles = ({ colors }: Theme) => StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'flex-end',
+  },
+  toolbar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  chip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    maxWidth: 240,
+    paddingHorizontal: spacing.sm + spacing.xxs,
+    minHeight: 28,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceSunken,
+  },
+  chipActive: {
+    backgroundColor: colors.primary,
+  },
+  chipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.muted,
+  },
+  chipTextActive: {
+    color: colors.onPrimary,
+  },
+  mentionSlot: {
+    width: 36,
+    height: layout.touchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mentionGlyph: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: colors.primary,
   },
   // WhatsApp-style pill: a borderless rounded fill that reads as a soft well
   // in the bar — a border would make it look like a web form field. The

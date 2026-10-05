@@ -5,7 +5,6 @@ import type { ViewStyle } from 'react-native';
 import { useTheme, useThemedStyles } from '../theme/ThemeContext';
 import { interaction, layout, maxFontScale, radius, spacing, type Theme } from '../theme/theme';
 import { formatClock } from '../utils/datetime';
-import { deriveTickState, TICK_LABELS, type TickState } from '../utils/receipts';
 import { Icon, type IconName } from './Icon';
 import type { DisplayMessage } from '../types/chat';
 
@@ -15,10 +14,29 @@ export type ChatMessageProps = {
   isFirstInGroup: boolean;
   isLastInGroup: boolean;
   senderName: string;
-  /** The other member's receipt watermarks (0 = never) — see utils/receipts. */
-  otherDeliveredAt: number;
-  otherReadAt: number;
+  /** Group chats label each run of received messages with its author. */
+  showSender: boolean;
+  /** Names of mentioned users, highlighted where "@Name" appears. */
+  mentionNames: readonly string[];
+  /** Explicit recipient of a group message ("Para Ana"); null = everyone. */
+  targetName: string | null;
+  /** The message mentions or targets the current user. */
+  addressedToMe: boolean;
   onRetry?: (localId: string) => void;
+};
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Splits text into plain and "@Name" segments for highlighting. */
+const splitMentions = (text: string, names: readonly string[]): Array<{ text: string; mention: boolean }> => {
+  if (names.length === 0) {
+    return [{ text, mention: false }];
+  }
+  const pattern = new RegExp(`(${[...names].sort((a, b) => b.length - a.length).map((n) => `@${escapeRegExp(n)}`).join('|')})`, 'g');
+  return text
+    .split(pattern)
+    .filter((part: string) => part.length > 0)
+    .map((part: string) => ({ text: part, mention: names.some((n: string) => part === `@${n}`) }));
 };
 
 export const ChatMessage: React.FC<ChatMessageProps> = ({
@@ -27,8 +45,10 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   isFirstInGroup,
   isLastInGroup,
   senderName,
-  otherDeliveredAt,
-  otherReadAt,
+  showSender,
+  mentionNames,
+  targetName,
+  addressedToMe,
   onRetry,
 }: ChatMessageProps) => {
   const { colors } = useTheme();
@@ -87,35 +107,13 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 
   const time: string = useMemo(() => formatClock(message.createdAt), [message.createdAt]);
 
-  // WhatsApp tick ladder: clock while sending, single grey tick once the
-  // server acked, double grey once the recipient's device received it, double
-  // blue once they opened the chat. Grey ticks reuse the in-bubble meta color
-  // (dimmed by the wrapper) so only "read" gets the blue accent.
-  const tickState: TickState = deriveTickState(message.createdAt, otherDeliveredAt, otherReadAt);
-  const statusSuffix: string = isSending
-    ? ', enviando'
-    : isFailed
-      ? ', falha no envio'
-      : isMine
-        ? `, ${TICK_LABELS[tickState]}`
-        : '';
-  const composedLabel = `${isMine ? 'Você' : senderName} disse: ${message.text}, às ${time}${statusSuffix}`;
+  const statusSuffix: string = isSending ? ', enviando' : isFailed ? ', falha no envio' : '';
+  const targetSuffix: string = targetName !== null ? `, para ${targetName}` : '';
+  const composedLabel = `${isMine ? 'Você' : senderName} disse: ${message.text}${targetSuffix}, às ${time}${statusSuffix}`;
 
-  const iconName: IconName = isSending
-    ? 'pending'
-    : isFailed
-      ? 'alert'
-      : tickState === 'sent'
-        ? 'check'
-        : 'check-double';
-  const iconColor: string = isSending
-    ? colors.textOnBubbleMine
-    : isFailed
-      ? colors.dangerText
-      : tickState === 'read'
-        ? colors.tickBlue
-        : colors.textOnBubbleMine;
-  const tickDimmed: boolean = !isSending && !isFailed && tickState !== 'read';
+  const iconName: IconName = isSending ? 'pending' : isFailed ? 'alert' : 'check';
+  const iconColor: string = isFailed ? colors.dangerText : colors.textOnBubbleMine;
+  const segments = useMemo(() => splitMentions(message.text, mentionNames), [message.text, mentionNames]);
 
   const handleRetry = (): void => {
     if (message.localId !== undefined && onRetry !== undefined) {
@@ -129,13 +127,32 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
         styles.bubble,
         bubbleRadiusStyle,
         isMine ? styles.bubbleMine : styles.bubbleTheirs,
+        !isMine && addressedToMe ? styles.bubbleAddressed : null,
         isFailed ? styles.bubbleFailed : null,
         isSending ? styles.bubbleSending : null,
       ]}
     >
+      {showSender && !isMine && isFirstInGroup ? (
+        <Text style={styles.sender} numberOfLines={1}>
+          {senderName}
+        </Text>
+      ) : null}
+      {targetName !== null ? (
+        <Text style={[styles.target, isMine ? styles.targetMine : null]} numberOfLines={1}>
+          {isMine ? `Para ${targetName}` : addressedToMe ? 'Para você' : `Para ${targetName}`}
+        </Text>
+      ) : null}
       <View style={styles.contentRow}>
         <Text style={[styles.text, isMine ? styles.textMine : styles.textTheirs, isFailed ? styles.textFailed : null]}>
-          {message.text}
+          {segments.map((segment, index) =>
+            segment.mention ? (
+              <Text key={index} style={[styles.mention, isMine ? styles.mentionMine : null]}>
+                {segment.text}
+              </Text>
+            ) : (
+              <Text key={index}>{segment.text}</Text>
+            ),
+          )}
         </Text>
         {isLastInGroup ? (
           <View style={styles.meta}>
@@ -148,10 +165,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             </Text>
             {isMine ? (
               <View
-                style={[
-                  styles.statusIcon,
-                  isSending || tickDimmed ? styles.statusIconDimmed : null,
-                ]}
+                style={[styles.statusIcon, isFailed ? null : styles.statusIconDimmed]}
               >
                 <Icon name={iconName} size={13} color={iconColor} />
               </View>
@@ -226,6 +240,34 @@ const createStyles = ({ colors }: Theme) => StyleSheet.create({
   bubbleTheirs: {
     backgroundColor: colors.bubbleTheirs,
   },
+  bubbleAddressed: {
+    borderLeftWidth: 3,
+    borderLeftColor: colors.mention,
+  },
+  sender: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.primary,
+    marginBottom: 2,
+  },
+  target: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.mention,
+    marginBottom: 2,
+  },
+  targetMine: {
+    color: colors.textOnBubbleMine,
+    opacity: 0.75,
+  },
+  mention: {
+    fontWeight: '700',
+    color: colors.mention,
+  },
+  mentionMine: {
+    color: colors.textOnBubbleMine,
+    textDecorationLine: 'underline',
+  },
   bubbleFailed: {
     backgroundColor: colors.dangerSurface,
     borderWidth: 1,
@@ -278,8 +320,7 @@ const createStyles = ({ colors }: Theme) => StyleSheet.create({
   statusIcon: {
     marginLeft: spacing.xs,
   },
-  // Grey (sent/delivered) ticks and the sending ring: dimmed meta, matching
-  // the in-bubble timestamp — only the read tick renders at full strength.
+  // Sent tick and sending ring: dimmed meta, matching the timestamp.
   statusIconDimmed: {
     opacity: 0.6,
   },

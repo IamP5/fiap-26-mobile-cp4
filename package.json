@@ -4,22 +4,25 @@
   "main": "index.ts",
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
-    "expo": "~57.0.16",
-    "expo-apple-authentication": "~57.0.1",
-    "expo-auth-session": "~57.0.9",
-    "expo-constants": "~57.0.14",
-    "expo-crypto": "~57.0.2",
-    "expo-image-picker": "~57.0.13",
+    "@react-native-firebase/app": "^26.4.0",
+    "@react-native-firebase/messaging": "^26.4.0",
+    "@react-navigation/native": "^7.5.0",
+    "@react-navigation/native-stack": "^7.20.0",
+    "expo": "~57.0.26",
+    "expo-build-properties": "~57.0.22",
+    "expo-constants": "~57.0.20",
+    "expo-image-picker": "~57.0.20",
     "expo-status-bar": "~57.0.1",
-    "expo-web-browser": "~57.0.2",
     "firebase": "^12.18.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "react-native": "0.86.2",
+    "react-native": "0.86.3",
     "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
     "react-native-web": "^0.21.2"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/react": "~19.2.2",
     "typescript": "~6.0.3"
   },
@@ -29,10 +32,13 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "rules:deploy": "firebase deploy --only database,storage --project fiap-mobile-e8e61",
-    "rules:verify": "node scripts/verify-rules.mjs",
-    "rules:verify:storage": "node scripts/verify-storage-rules.mjs",
-    "rules:clean": "firebase database:remove / --project fiap-mobile-e8e61 --force"
+    "test:rules": "firebase emulators:exec --only firestore,database,storage,auth --project fiap-mobile-9eaf0 \"node --test --test-force-exit tests/rules.test.mjs\"",
+    "test:api": "firebase emulators:exec --only firestore,database,auth --project fiap-mobile-9eaf0 \"node --test --test-force-exit tests/api.integration.mjs\"",
+    "test:server": "cd server && go test ./...",
+    "test": "npm run typecheck && npm run test:server && npm run test:rules && npm run test:api",
+    "rules:deploy": "firebase deploy --only firestore,database,storage --project fiap-mobile-9eaf0",
+    "api:deploy": "./server/deploy.sh",
+    "emulators": "firebase emulators:start --only auth,firestore,database,storage --project fiap-mobile-9eaf0"
   },
   "private": true
 }

@@ -1,97 +1,114 @@
-import { get, onValue, ref, set } from 'firebase/database';
+import {
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  orderBy,
+  query,
+  writeBatch,
+  type DocumentData,
+  type QueryDocumentSnapshot,
+} from 'firebase/firestore';
 
-import { database } from './firebase';
-import type { AuthProvider, ChatUser, StoredUser } from '../types/user';
+import type { ChatUser, PublicProfile, StoredPublicProfile, StoredUser } from '../types/user';
+import { isApiError } from '../utils/errors';
+import { apiRequest } from './apiClient';
+import { firestore } from './firebase';
 
-const USERS_PATH = 'users';
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
 
-const isAuthProvider = (value: unknown): value is AuthProvider =>
-  value === 'password' || value === 'google' || value === 'apple';
+const asString = (value: unknown): string => (typeof value === 'string' ? value : '');
 
-const toStoredUser = (user: ChatUser): StoredUser => ({
-  uid: user.uid,
-  name: user.name,
-  email: user.email === null ? '' : user.email,
-  photoUrl: user.photoUrl === null ? '' : user.photoUrl,
-  provider: user.provider,
-  createdAt: user.createdAt,
-});
+const safePhotoUrl = (value: unknown): string =>
+  typeof value === 'string' && value.startsWith('https://') ? value : '';
 
-const parseChatUser = (value: unknown): ChatUser | null => {
-  if (typeof value !== 'object' || value === null) {
+export const parseChatUser = (uid: string, value: unknown): ChatUser | null => {
+  if (!isRecord(value) || typeof value.name !== 'string' || typeof value.createdAt !== 'number') {
     return null;
   }
-  const record: Record<string, unknown> = value as Record<string, unknown>;
-  const uid: unknown = record.uid;
-  const name: unknown = record.name;
-  const email: unknown = record.email;
-  const photoUrl: unknown = record.photoUrl;
-  const provider: unknown = record.provider;
-  const createdAt: unknown = record.createdAt;
-
-  if (typeof uid !== 'string' || uid.length === 0) {
-    return null;
-  }
-  if (typeof name !== 'string' || name.length === 0) {
-    return null;
-  }
-  if (!isAuthProvider(provider)) {
-    return null;
-  }
-  if (typeof createdAt !== 'number') {
-    return null;
-  }
-
-  const normalizedEmail: string | null =
-    typeof email === 'string' && email.length > 0 ? email : null;
-  // Only https urls are trusted for rendering; anything else falls back to
-  // initials (profiles written by older app versions simply have no field).
-  const normalizedPhotoUrl: string | null =
-    typeof photoUrl === 'string' && photoUrl.startsWith('https://') ? photoUrl : null;
-
-  return { uid, name, email: normalizedEmail, photoUrl: normalizedPhotoUrl, provider, createdAt };
+  return {
+    uid,
+    name: value.name,
+    email: asString(value.email),
+    phoneNumber: asString(value.phoneNumber),
+    birthDate: asString(value.birthDate),
+    photoUrl: safePhotoUrl(value.photoUrl),
+    createdAt: value.createdAt,
+  };
 };
 
+const parsePublicProfile = (uid: string, value: DocumentData): PublicProfile | null =>
+  typeof value.name === 'string' && value.name.length > 0
+    ? { uid, name: value.name, photoUrl: safePhotoUrl(value.photoUrl) }
+    : null;
+
+/** Writes the private profile and its public directory entry atomically. */
 export const saveUser = async (user: ChatUser): Promise<void> => {
-  const payload: StoredUser = toStoredUser(user);
-  await set(ref(database, `${USERS_PATH}/${user.uid}`), payload);
+  const stored: StoredUser = {
+    name: user.name,
+    email: user.email,
+    phoneNumber: user.phoneNumber,
+    birthDate: user.birthDate,
+    photoUrl: user.photoUrl,
+    createdAt: user.createdAt,
+  };
+  const publicEntry: StoredPublicProfile = {
+    name: user.name,
+    nameLower: user.name.toLowerCase(),
+    photoUrl: user.photoUrl,
+    updatedAt: Date.now(),
+  };
+  const batch = writeBatch(firestore);
+  batch.set(doc(firestore, 'users', user.uid), stored);
+  batch.set(doc(firestore, 'publicProfiles', user.uid), publicEntry);
+  await batch.commit();
 };
 
-export const getUser = async (uid: string): Promise<ChatUser | null> => {
-  const snapshot = await get(ref(database, `${USERS_PATH}/${uid}`));
-  if (!snapshot.exists()) {
-    return null;
-  }
-  return parseChatUser(snapshot.val());
+/** Reads MY private profile (the rules allow only the owner). */
+export const getOwnUser = async (uid: string): Promise<ChatUser | null> => {
+  const snapshot = await getDoc(doc(firestore, 'users', uid));
+  return snapshot.exists() ? parseChatUser(uid, snapshot.data()) : null;
 };
 
-export const subscribeToUsers = (
-  onChange: (users: ChatUser[]) => void,
+/** Live directory of registered users, sorted by name. */
+export const subscribeToDirectory = (
+  onChange: (profiles: PublicProfile[]) => void,
   onError: (error: unknown) => void,
-): (() => void) => {
-  const usersRef = ref(database, USERS_PATH);
-
-  const unsubscribe = onValue(
-    usersRef,
+): (() => void) =>
+  onSnapshot(
+    query(collection(firestore, 'publicProfiles'), orderBy('nameLower')),
     (snapshot) => {
-      const users: ChatUser[] = [];
-      snapshot.forEach((child) => {
-        const parsed = parseChatUser(child.val());
-        if (parsed !== null) {
-          users.push(parsed);
-        }
-      });
-      const sorted: ChatUser[] = [...users].sort((a, b) =>
-        a.name.localeCompare(b.name, 'pt-BR'),
-      );
-      onChange(sorted);
+      const profiles: PublicProfile[] = snapshot.docs
+        .map((entry: QueryDocumentSnapshot) => parsePublicProfile(entry.id, entry.data()))
+        .filter((profile): profile is PublicProfile => profile !== null);
+      onChange(profiles);
     },
-    (error) => {
-      onError(error);
-    },
+    onError,
   );
 
-  return (): void => {
-    unsubscribe();
-  };
+export type ProfileResult =
+  | { status: 'ok'; user: ChatUser }
+  | { status: 'not_shared' }
+  | { status: 'not_found' };
+
+/**
+ * Registration data of another user. Served by the API, which only answers
+ * when the two users share a direct conversation or a group.
+ */
+export const fetchSharedProfile = async (uid: string): Promise<ProfileResult> => {
+  try {
+    const body: unknown = await apiRequest('GET', `/profiles/${encodeURIComponent(uid)}`);
+    const user: ChatUser | null =
+      isRecord(body) && isRecord(body.profile) ? parseChatUser(uid, body.profile) : null;
+    return user === null ? { status: 'not_found' } : { status: 'ok', user };
+  } catch (error: unknown) {
+    if (isApiError(error, 'PROFILE_NOT_SHARED')) {
+      return { status: 'not_shared' };
+    }
+    if (isApiError(error, 'PROFILE_NOT_FOUND')) {
+      return { status: 'not_found' };
+    }
+    throw error;
+  }
 };

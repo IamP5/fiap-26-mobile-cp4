@@ -7,11 +7,11 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
-  Pressable,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '../components/Avatar';
@@ -20,111 +20,169 @@ import { ChatMessage } from '../components/ChatMessage';
 import { DateSeparator } from '../components/DateSeparator';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorMessage } from '../components/ErrorMessage';
-import { Icon } from '../components/Icon';
 import { Loading } from '../components/Loading';
+import { ScreenHeader } from '../components/ScreenHeader';
 import { ScrollToLatestButton } from '../components/ScrollToLatestButton';
+import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
+import { useAuth } from '../hooks/useAuth';
 import { useChat } from '../hooks/useChat';
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { androidRipple, layout, spacing, type Theme } from '../theme/theme';
+import { useGroup } from '../hooks/useGroups';
+import { setActiveConversation } from '../navigation/navigationRef';
+import { syncGroupAccess } from '../services/groupService';
+import { useThemedStyles } from '../theme/ThemeContext';
+import { layout, spacing, type Theme } from '../theme/theme';
 import type { DisplayMessage } from '../types/chat';
-import type { ChatUser } from '../types/user';
-import { providerLabel } from '../utils/chatRules';
+import type { ScreenProps } from '../types/navigation';
+import type { ChatUser, PublicProfile } from '../types/user';
+import { otherParticipant } from '../utils/conversationId';
+import { availableSlots } from '../utils/groupValidation';
 import { buildChatRows, type ChatRow } from '../utils/messageRows';
 
-export type ChatScreenProps = {
-  me: ChatUser;
-  other: ChatUser;
-  onBack: () => void;
-};
-
-/** Distance (in the inverted list's own coordinate space) from the newest
- * message past which the scroll-to-latest button appears. */
 const SCROLL_BUTTON_THRESHOLD = 240;
 
-export const ChatScreen: React.FC<ChatScreenProps> = ({ me, other, onBack }) => {
-  const { colors } = useTheme();
+const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigation, route, me }) => {
   const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
-  const { messages, loading, error, otherDeliveredAt, otherReadAt, send, resend, retryInit } =
-    useChat(me, other);
-  const listRef = useRef<FlatList<ChatRow<DisplayMessage>>>(null);
-  const [showScrollButton, setShowScrollButton] = useState<boolean>(false);
-  const [keyboardVisible, setKeyboardVisible] = useState<boolean>(false);
+  const { conversationId, conversationType } = route.params;
+  const isGroup: boolean = conversationType === 'group';
+  const { byUid } = useDirectory();
+  const { group, loading: groupLoading, unavailable: groupUnavailable } = useGroup(isGroup ? conversationId : null);
 
-  // On iOS, KeyboardAvoidingView's "padding" behavior pads the screen by the
-  // full keyboard frame height (which itself covers the home-indicator safe
-  // area), so the composer must drop its own bottom safe-area padding while
-  // the keyboard is up or the two insets stack into a visible gap. On
-  // Android, "height" behavior parks the KAV's bottom edge flush with the
-  // keyboard's top edge, but react-native-safe-area-context's Android insets
-  // exclude the IME type — `insets.bottom` stays at the navigation-bar height
-  // the whole time the keyboard is open — so the exact same stacked-inset gap
-  // shows up there too unless it is collapsed the same way. iOS only has
-  // "will" events; Android only fires "did".
+  const otherUid: string | null = isGroup ? null : otherParticipant(conversationId, me.uid);
+  const other: PublicProfile | null = otherUid === null ? null : profileOrFallback(byUid, otherUid);
+  const amMember: boolean = !isGroup || (group !== null && group.memberIds.includes(me.uid));
+
+  const { messages, loading, error, accessLost, pushWarning, dismissPushWarning, send, resend, retry } = useChat(
+    conversationId,
+    conversationType,
+    me.uid,
+    amMember && !groupUnavailable,
+  );
+
+  // A group I am listed in but cannot read means the RTDB membership mirror
+  // lags behind Firestore (e.g. I was just added): ask the API to re-sync.
+  const resyncedRef = useRef<boolean>(false);
   useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const showSub = Keyboard.addListener(showEvent, () => setKeyboardVisible(true));
-    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
-    return (): void => {
-      showSub.remove();
-      hideSub.remove();
+    if (accessLost && isGroup && amMember && !resyncedRef.current) {
+      resyncedRef.current = true;
+      syncGroupAccess(conversationId)
+        .then(retry)
+        .catch(() => undefined);
+    }
+  }, [accessLost, isGroup, amMember, conversationId, retry]);
+
+  // Suppress in-app banners for the conversation on screen.
+  useFocusEffect(
+    useCallback(() => {
+      setActiveConversation(conversationId);
+      return () => setActiveConversation(null);
+    }, [conversationId]),
+  );
+
+  const [keyboardVisible, setKeyboardVisible] = useState<boolean>(false);
+  useEffect(() => {
+    const show = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', () =>
+      setKeyboardVisible(true),
+    );
+    const hide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () =>
+      setKeyboardVisible(false),
+    );
+    return () => {
+      show.remove();
+      hide.remove();
     };
   }, []);
 
-  const rows = useMemo<ChatRow<DisplayMessage>[]>(
-    () => buildChatRows(messages, me.uid),
-    [messages, me.uid],
+  const listRef = useRef<FlatList<ChatRow<DisplayMessage>>>(null);
+  const [showScrollButton, setShowScrollButton] = useState<boolean>(false);
+
+  const rows = useMemo<ChatRow<DisplayMessage>[]>(() => buildChatRows(messages, me.uid), [messages, me.uid]);
+
+  const otherMembers = useMemo<PublicProfile[] | undefined>(
+    () =>
+      isGroup && group !== null
+        ? group.memberIds.filter((uid: string) => uid !== me.uid).map((uid: string) => profileOrFallback(byUid, uid))
+        : undefined,
+    [isGroup, group, me.uid, byUid],
   );
 
-  const keyExtractor = useCallback((row: ChatRow<DisplayMessage>): string => row.key, []);
+  const nameOf = useCallback(
+    (uid: string): string => (uid === me.uid ? me.name : profileOrFallback(byUid, uid).name),
+    [byUid, me.uid, me.name],
+  );
 
   const renderItem = useCallback(
     ({ item }: ListRenderItemInfo<ChatRow<DisplayMessage>>): React.ReactElement => {
       if (item.kind === 'day') {
         return <DateSeparator label={item.label} />;
       }
+      const message: DisplayMessage = item.message;
+      const targetId: string | null = message.target.type === 'member' ? message.target.memberId : null;
       return (
         <ChatMessage
-          message={item.message}
+          message={message}
           isMine={item.isMine}
           isFirstInGroup={item.isFirstInGroup}
           isLastInGroup={item.isLastInGroup}
-          senderName={other.name}
-          otherDeliveredAt={otherDeliveredAt}
-          otherReadAt={otherReadAt}
+          senderName={nameOf(message.senderId)}
+          showSender={isGroup}
+          mentionNames={message.mentionedUserIds.map(nameOf)}
+          targetName={isGroup && targetId !== null ? nameOf(targetId) : null}
+          addressedToMe={targetId === me.uid || message.mentionedUserIds.includes(me.uid)}
           onRetry={resend}
         />
       );
     },
-    [other.name, otherDeliveredAt, otherReadAt, resend],
+    [nameOf, isGroup, me.uid, resend],
   );
 
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>): void => {
-    const offsetY: number = event.nativeEvent.contentOffset.y;
-    setShowScrollButton(offsetY > SCROLL_BUTTON_THRESHOLD);
+    setShowScrollButton(event.nativeEvent.contentOffset.y > SCROLL_BUTTON_THRESHOLD);
   }, []);
 
-  const scrollToLatest = useCallback((): void => {
-    listRef.current?.scrollToOffset({ offset: 0, animated: true });
-  }, []);
+  const openDetails = useCallback((): void => {
+    if (isGroup) {
+      navigation.navigate('GroupInfo', { groupId: conversationId });
+    } else if (otherUid !== null) {
+      navigation.navigate('Profile', { uid: otherUid });
+    }
+  }, [isGroup, navigation, conversationId, otherUid]);
+
+  const title: string = isGroup ? (group?.name ?? (groupLoading ? 'Carregando...' : 'Grupo')) : (other?.name ?? 'Conversa');
+  const subtitle: string = isGroup
+    ? group !== null
+      ? `${group.memberIds.length} integrantes${availableSlots(group.memberLimit, group.memberIds.length) === 0 ? ' · grupo cheio' : ''} · toque para ver`
+      : ''
+    : 'Toque para ver o perfil';
+
+  const removed: boolean = isGroup && (groupUnavailable || (!groupLoading && group !== null && !amMember));
 
   const renderBody = (): React.ReactElement => {
+    if (removed) {
+      return (
+        <EmptyState
+          variant="contacts"
+          title="Você não faz mais parte deste grupo"
+          description="Foi removido pelo proprietário ou o grupo foi excluído. As mensagens não estão mais disponíveis."
+        />
+      );
+    }
     if (loading) {
       return <Loading label="Abrindo conversa..." />;
     }
     if (error !== null) {
-      return <ErrorMessage message={error} onRetry={retryInit} />;
+      return (
+        <View style={styles.padded}>
+          <ErrorMessage message={error} onRetry={retry} />
+        </View>
+      );
     }
-    // Rendering EmptyState directly (rather than via ListEmptyComponent)
-    // sidesteps the inverted-list mirroring gotcha entirely, and there is no
-    // longer a ref-preserving reason to keep the list mounted while empty.
     if (messages.length === 0) {
       return (
         <EmptyState
           variant="messages"
           title="Nenhuma mensagem ainda"
-          description={`Envie a primeira mensagem para ${other.name}.`}
+          description={isGroup ? 'Envie a primeira mensagem para o grupo.' : `Envie a primeira mensagem para ${other?.name ?? 'esta pessoa'}.`}
         />
       );
     }
@@ -132,7 +190,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({ me, other, onBack }) => 
       <FlatList
         ref={listRef}
         data={rows}
-        keyExtractor={keyExtractor}
+        keyExtractor={(row: ChatRow<DisplayMessage>) => row.key}
         renderItem={renderItem}
         inverted
         contentContainerStyle={styles.listContent}
@@ -143,113 +201,74 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({ me, other, onBack }) => 
         initialNumToRender={15}
         maxToRenderPerBatch={10}
         windowSize={11}
-        accessibilityLiveRegion="polite"
         showsVerticalScrollIndicator={false}
       />
     );
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={0}
-    >
-      {/* On dark, the header separates from the canvas by surface contrast +
-          hairline alone — a drop shadow would read as a light-theme artifact. */}
-      <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
-        <Pressable
-          onPress={onBack}
-          hitSlop={8}
-          accessibilityRole="button"
-          accessibilityLabel="Voltar"
-          android_ripple={androidRipple(colors.ripple, true)}
-          style={({ pressed }: { pressed: boolean }) => [
-            styles.backButton,
-            pressed ? styles.backButtonPressed : null,
-          ]}
-        >
-          <Icon name="chevron-left" color={colors.primary} />
-        </Pressable>
-        <Avatar name={other.name} uid={other.uid} photoUrl={other.photoUrl} size={layout.avatar.sm} />
-        <View style={styles.headerInfo}>
-          <Text style={styles.headerName} numberOfLines={2}>
-            {other.name}
+    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      <ScreenHeader
+        title={title}
+        subtitle={subtitle}
+        onBack={navigation.goBack}
+        onTitlePress={removed ? undefined : openDetails}
+        titleAccessibilityLabel={isGroup ? `Ver integrantes de ${title}` : `Ver perfil de ${title}`}
+        leading={
+          <Avatar
+            name={title}
+            uid={otherUid ?? conversationId}
+            photoUrl={isGroup ? (group?.photoUrl ?? '') : (other?.photoUrl ?? '')}
+            variant={isGroup ? 'group' : 'person'}
+            size={layout.avatar.sm + 4}
+          />
+        }
+      />
+      {pushWarning !== null ? (
+        <View style={styles.warning}>
+          <Text style={styles.warningText} onPress={dismissPushWarning}>
+            {pushWarning} (toque para fechar)
           </Text>
-          <Text style={styles.headerSubtitle}>{providerLabel(other.provider)}</Text>
         </View>
-      </View>
-
+      ) : null}
       <View style={styles.body}>
         {renderBody()}
-        {!loading && error === null && messages.length > 0 ? (
-          <ScrollToLatestButton visible={showScrollButton} onPress={scrollToLatest} />
+        {!loading && error === null && !removed && messages.length > 0 ? (
+          <ScrollToLatestButton
+            visible={showScrollButton}
+            onPress={() => listRef.current?.scrollToOffset({ offset: 0, animated: true })}
+          />
         ) : null}
       </View>
-
-      <View
-        style={[
-          styles.inputArea,
-          { paddingBottom: keyboardVisible ? spacing.sm : insets.bottom + spacing.sm },
-        ]}
-      >
-        <ChatInput onSend={send} disabled={loading || error !== null} />
-      </View>
+      {removed ? null : (
+        <View style={[styles.inputArea, { paddingBottom: keyboardVisible ? spacing.sm : insets.bottom + spacing.sm }]}>
+          <ChatInput onSend={send} disabled={loading || error !== null || !amMember} members={otherMembers} />
+        </View>
+      )}
     </KeyboardAvoidingView>
   );
 };
 
-const createStyles = ({ colors }: Theme) => StyleSheet.create({
-  container: {
-    flex: 1,
-    // The thread sits on a tinted wash (WhatsApp/Telegram style); header and
-    // composer stay on plain surface so they read as chrome above the canvas.
-    backgroundColor: colors.chatBackground,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.sm,
-    paddingBottom: spacing.sm,
-    backgroundColor: colors.surface,
-    borderBottomWidth: layout.hairline,
-    borderBottomColor: colors.separator,
-  },
-  backButton: {
-    width: layout.touchTarget,
-    height: layout.touchTarget,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backButtonPressed: {
-    opacity: 0.7,
-  },
-  headerInfo: {
-    flex: 1,
-    marginLeft: spacing.sm + spacing.xs,
-  },
-  headerName: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: colors.text,
-  },
-  headerSubtitle: {
-    marginTop: 1,
-    fontSize: 13,
-    color: colors.muted,
-  },
-  body: {
-    flex: 1,
-  },
-  listContent: {
-    paddingHorizontal: spacing.sm + spacing.xs,
-    paddingVertical: spacing.md,
-  },
-  inputArea: {
-    paddingHorizontal: spacing.sm,
-    paddingTop: spacing.sm,
-    backgroundColor: colors.surface,
-    borderTopWidth: layout.hairline,
-    borderTopColor: colors.separator,
-  },
-});
+export const ChatScreen: React.FC<ScreenProps<'Chat'>> = (props) => {
+  const { user } = useAuth();
+  return user === null ? null : <ChatContent {...props} me={user} />;
+};
+
+const createStyles = ({ colors }: Theme) =>
+  StyleSheet.create({
+    container: { flex: 1, backgroundColor: colors.chatBackground },
+    body: { flex: 1 },
+    padded: { padding: spacing.md },
+    listContent: { paddingHorizontal: spacing.sm + spacing.xs, paddingVertical: spacing.md },
+    warning: { backgroundColor: colors.dangerSurface, paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
+    warningText: { fontSize: 12, color: colors.dangerText },
+    inputArea: {
+      paddingHorizontal: spacing.sm,
+      paddingTop: spacing.sm,
+      backgroundColor: colors.surface,
+      borderTopWidth: layout.hairline,
+      borderTopColor: colors.separator,
+    },
+  });
+
+export default ChatScreen;

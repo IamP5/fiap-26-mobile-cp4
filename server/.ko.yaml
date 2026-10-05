@@ -1,0 +1,14 @@
+# ko builds the image from the local Go toolchain (no Docker daemon): a static
+# binary layered on the same distroless base the Dockerfile uses.
+defaultBaseImage: gcr.io/distroless/static-debian12:nonroot
+defaultPlatforms:
+  - linux/amd64
+builds:
+  - id: api
+    main: .
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w

@@ -1,58 +1,54 @@
 import {
-  get,
+  collection,
+  doc,
+  getDoc,
+  onSnapshot,
+  query,
+  setDoc,
+  where,
+  type QueryDocumentSnapshot,
+} from 'firebase/firestore';
+import {
   limitToLast,
   onValue,
   orderByChild,
   push,
-  query,
+  query as rtdbQuery,
   ref,
   set,
-  update,
   type DataSnapshot,
   type DatabaseReference,
 } from 'firebase/database';
 
-import { database } from './firebase';
 import type {
   ChatMessage,
-  Conversation,
-  ReceiptMarks,
-  StoredConversation,
+  ConversationType,
+  DirectConversation,
+  MessageTarget,
+  OutgoingMessage,
   StoredMessage,
 } from '../types/chat';
-import type { ChatUser } from '../types/user';
-import { buildConversationId, canChat, providerLabel } from '../utils/chatRules';
-import { createAppError } from '../utils/errors';
+import { buildDirectConversationId } from '../utils/conversationId';
+import { createAppError, isApiError } from '../utils/errors';
+import { apiRequest } from './apiClient';
+import { database, firestore } from './firebase';
 
+export const MAX_MESSAGE_LENGTH = 2000;
 const MESSAGES_LIMIT = 200;
 
 /**
- * The Realtime Database SDK queues every read/write while the client is offline
- * and only settles them on a server ack — with no built-in deadline. Without an
- * explicit one the chat screen would spin forever and the send button would stay
- * disabled for good, so every round-trip below is bounded.
+ * The Realtime Database SDK queues writes while offline and settles them only
+ * on a server ack, with no deadline. Sends are raced against one so the UI can
+ * show a retryable failure instead of spinning forever.
  */
 const RTDB_TIMEOUT_MS = 12000;
 const SERVER_OFFSET_TIMEOUT_MS = 2000;
 
-const TIMEOUT_OPEN_MESSAGE =
-  'Tempo esgotado ao abrir a conversa. Verifique sua conexão e tente novamente.';
-const TIMEOUT_SEND_MESSAGE =
-  'Tempo esgotado ao enviar a mensagem. Verifique sua conexão e tente novamente.';
-const BROKEN_CONVERSATION_MESSAGE =
-  'Esta conversa está com dados inválidos no banco e não pode ser aberta. ' +
-  'Peça a um administrador para remover o nó desta conversa no Realtime Database.';
+type Timed<T> = { status: 'ok'; value: T } | { status: 'timeout' } | { status: 'failed'; error: unknown };
 
-type Timed<T> =
-  | { status: 'ok'; value: T }
-  | { status: 'timeout' }
-  | { status: 'failed'; error: unknown };
-
-const runWithDeadline = <T>(operation: Promise<T>, timeoutMs: number): Promise<Timed<T>> =>
+const runWithDeadline = <T,>(operation: Promise<T>, timeoutMs: number): Promise<Timed<T>> =>
   new Promise<Timed<T>>((resolve) => {
-    const timer = setTimeout((): void => {
-      resolve({ status: 'timeout' });
-    }, timeoutMs);
+    const timer = setTimeout((): void => resolve({ status: 'timeout' }), timeoutMs);
     operation.then(
       (value: T): void => {
         clearTimeout(timer);
@@ -65,19 +61,140 @@ const runWithDeadline = <T>(operation: Promise<T>, timeoutMs: number): Promise<T
     );
   });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+// ---- direct conversations (Firestore) -------------------------------------
+
+const parseDirectConversation = (id: string, value: unknown): DirectConversation | null => {
+  if (!isRecord(value) || !Array.isArray(value.participantIds) || typeof value.createdAt !== 'number') {
+    return null;
+  }
+  const [first, second] = value.participantIds;
+  if (typeof first !== 'string' || typeof second !== 'string' || value.participantIds.length !== 2) {
+    return null;
+  }
+  return { id, type: 'direct', participants: [first, second], createdAt: value.createdAt };
+};
+
 /**
- * Difference between the server clock and this device's clock, published by the
- * SDK at `.info/serverTimeOffset`. The rules reject `createdAt > now + 60000`
- * (server time), so a device clock running fast would otherwise make every send
- * fail with PERMISSION_DENIED.
+ * Finds or creates the single direct conversation of a pair. The id is the
+ * sorted uids, so concurrent creations by both users target the same
+ * document; the rules allow only creation (never overwrite), and the loser of
+ * that race simply reads the winner's document.
+ */
+export const ensureDirectConversation = async (meUid: string, otherUid: string): Promise<DirectConversation> => {
+  if (meUid === otherUid) {
+    throw createAppError('Não é possível iniciar uma conversa com você mesmo.');
+  }
+  const conversationId: string = buildDirectConversationId(meUid, otherUid);
+  const conversationRef = doc(firestore, 'directConversations', conversationId);
+
+  const existing = await getDoc(conversationRef);
+  const parsed = existing.exists() ? parseDirectConversation(conversationId, existing.data()) : null;
+  if (parsed !== null) {
+    return parsed;
+  }
+
+  const participants: [string, string] = meUid < otherUid ? [meUid, otherUid] : [otherUid, meUid];
+  const createdAt: number = Date.now();
+  try {
+    await setDoc(conversationRef, { participantIds: participants, createdAt });
+  } catch (error: unknown) {
+    const raced = await getDoc(conversationRef);
+    const winner = raced.exists() ? parseDirectConversation(conversationId, raced.data()) : null;
+    if (winner === null) {
+      throw error;
+    }
+    return winner;
+  }
+  return { id: conversationId, type: 'direct', participants, createdAt };
+};
+
+export const subscribeToDirectConversations = (
+  meUid: string,
+  onChange: (conversations: DirectConversation[]) => void,
+  onError: (error: unknown) => void,
+): (() => void) =>
+  onSnapshot(
+    query(collection(firestore, 'directConversations'), where('participantIds', 'array-contains', meUid)),
+    (snapshot) => {
+      onChange(
+        snapshot.docs
+          .map((entry: QueryDocumentSnapshot) => parseDirectConversation(entry.id, entry.data()))
+          .filter((conversation): conversation is DirectConversation => conversation !== null),
+      );
+    },
+    onError,
+  );
+
+// ---- messages (Realtime Database) -------------------------------------------
+
+const parseTarget = (value: unknown): MessageTarget | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (value.type === 'conversation') {
+    return { type: 'conversation' };
+  }
+  if (value.type === 'member' && typeof value.memberId === 'string') {
+    return { type: 'member', memberId: value.memberId };
+  }
+  return null;
+};
+
+const parseMessage = (conversationId: string, id: string, value: unknown): ChatMessage | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { conversationType, senderId, text, createdAt, mentionedUserIds } = value;
+  const target: MessageTarget | null = parseTarget(value.target);
+  if (
+    (conversationType !== 'direct' && conversationType !== 'group') ||
+    typeof senderId !== 'string' ||
+    typeof text !== 'string' ||
+    typeof createdAt !== 'number' ||
+    target === null
+  ) {
+    return null;
+  }
+  const mentions: string[] = isRecord(mentionedUserIds)
+    ? Object.keys(mentionedUserIds).filter((uid: string) => mentionedUserIds[uid] === true)
+    : [];
+  return { id, conversationId, conversationType, senderId, text, target, mentionedUserIds: mentions, createdAt };
+};
+
+/** Live window of the latest messages. Returns the unsubscribe function,
+ * which callers invoke when the screen unmounts or the conversation changes. */
+export const subscribeToMessages = (
+  conversationId: string,
+  onChange: (messages: ChatMessage[]) => void,
+  onError: (error: unknown) => void,
+  limit: number = MESSAGES_LIMIT,
+): (() => void) =>
+  onValue(
+    rtdbQuery(ref(database, `messages/${conversationId}`), orderByChild('createdAt'), limitToLast(limit)),
+    (snapshot: DataSnapshot) => {
+      const messages: ChatMessage[] = [];
+      snapshot.forEach((child: DataSnapshot) => {
+        const parsed = child.key === null ? null : parseMessage(conversationId, child.key, child.val());
+        if (parsed !== null) {
+          messages.push(parsed);
+        }
+      });
+      onChange([...messages].sort((a, b) => a.createdAt - b.createdAt));
+    },
+    onError,
+  );
+
+/**
+ * Server clock offset published by the SDK. The rules reject createdAt far
+ * from the server's `now`, so a phone with a wrong clock would otherwise fail
+ * every send.
  */
 const readServerTimeOffset = (): Promise<number> =>
   new Promise<number>((resolve) => {
-    const state: { settled: boolean; unsubscribe: (() => void) | null } = {
-      settled: false,
-      unsubscribe: null,
-    };
-
+    const state: { settled: boolean; unsubscribe: (() => void) | null } = { settled: false, unsubscribe: null };
     const finish = (offset: number): void => {
       if (state.settled) {
         return;
@@ -85,447 +202,162 @@ const readServerTimeOffset = (): Promise<number> =>
       state.settled = true;
       clearTimeout(timer);
       resolve(offset);
-      if (state.unsubscribe !== null) {
-        state.unsubscribe();
-        state.unsubscribe = null;
-      }
+      state.unsubscribe?.();
     };
-
-    const timer = setTimeout((): void => {
-      finish(0);
-    }, SERVER_OFFSET_TIMEOUT_MS);
-
+    const timer = setTimeout((): void => finish(0), SERVER_OFFSET_TIMEOUT_MS);
     const unsubscribe = onValue(
       ref(database, '.info/serverTimeOffset'),
       (snapshot: DataSnapshot): void => {
         const raw: unknown = snapshot.val();
         finish(typeof raw === 'number' ? raw : 0);
       },
-      (): void => {
-        finish(0);
-      },
+      (): void => finish(0),
     );
-
     if (state.settled) {
-      // `.info` listeners can fire synchronously; the subscription is already
-      // resolved, so release it right away.
       unsubscribe();
     } else {
       state.unsubscribe = unsubscribe;
     }
   });
 
-const serverAlignedNow = async (): Promise<number> => {
-  const offset: number = await readServerTimeOffset();
-  return Date.now() + offset;
-};
+export const serverAlignedNow = async (): Promise<number> => Date.now() + (await readServerTimeOffset());
 
-const parseMessage = (value: unknown): ChatMessage | null => {
-  if (typeof value !== 'object' || value === null) {
-    return null;
-  }
-  const record: Record<string, unknown> = value as Record<string, unknown>;
-  const id: unknown = record.id;
-  const conversationId: unknown = record.conversationId;
-  const senderId: unknown = record.senderId;
-  const receiverId: unknown = record.receiverId;
-  const text: unknown = record.text;
-  const createdAt: unknown = record.createdAt;
-
-  if (
-    typeof id !== 'string' ||
-    typeof conversationId !== 'string' ||
-    typeof senderId !== 'string' ||
-    typeof receiverId !== 'string' ||
-    typeof text !== 'string' ||
-    typeof createdAt !== 'number'
-  ) {
-    return null;
-  }
-
-  return { id, conversationId, senderId, receiverId, text, createdAt };
-};
-
-const parseConversation = (
-  id: string,
-  value: unknown,
-): Conversation | null => {
-  if (typeof value !== 'object' || value === null) {
-    return null;
-  }
-  const record: Record<string, unknown> = value as Record<string, unknown>;
-  const participants: unknown = record.participants;
-  const createdAt: unknown = record.createdAt;
-
-  if (typeof participants !== 'object' || participants === null) {
-    return null;
-  }
-  if (typeof createdAt !== 'number') {
-    return null;
-  }
-
-  const uids: string[] = Object.keys(participants as Record<string, unknown>);
-  if (uids.length !== 2) {
-    return null;
-  }
-  const sorted: string[] = [...uids].sort();
-  const first: string | undefined = sorted[0];
-  const second: string | undefined = sorted[1];
-  if (first === undefined || second === undefined) {
-    return null;
-  }
-
-  return { id, participants: [first, second], createdAt };
-};
-
-type ConversationRead =
-  | { status: 'found'; conversation: Conversation }
-  /** The node does not exist yet, or the membership-based read rule denied it. */
-  | { status: 'absent' }
-  /** The node exists but does not match the expected shape. */
-  | { status: 'invalid' }
-  | { status: 'timeout' };
-
-/**
- * Reads conversations/$cid.
- *
- * The deployed read rule requires `participants/auth.uid === true` evaluated
- * against the CURRENT data, so reading a conversation that does not exist yet is
- * rejected with PERMISSION_DENIED instead of resolving an empty snapshot. A
- * failed read is therefore reported as "absent" (i.e. "not created yet") and the
- * caller falls through to the create path, which the write rule does allow.
- */
-const readConversation = async (
-  conversationRef: DatabaseReference,
-  conversationId: string,
-): Promise<ConversationRead> => {
-  const result: Timed<DataSnapshot> = await runWithDeadline(
-    get(conversationRef),
-    RTDB_TIMEOUT_MS,
-  );
-
-  if (result.status === 'timeout') {
-    return { status: 'timeout' };
-  }
-  if (result.status === 'failed') {
-    return { status: 'absent' };
-  }
-  if (!result.value.exists()) {
-    return { status: 'absent' };
-  }
-
-  const parsed: Conversation | null = parseConversation(conversationId, result.value.val());
-  return parsed === null ? { status: 'invalid' } : { status: 'found', conversation: parsed };
-};
-
-const writeUserConversationIndex = async (
-  conversation: Conversation,
-  meUid: string,
-  otherUid: string,
-): Promise<void> => {
-  await Promise.all([
-    set(ref(database, `userConversations/${meUid}/${conversation.id}`), {
-      otherUid,
-      createdAt: conversation.createdAt,
-    }),
-    set(ref(database, `userConversations/${otherUid}/${conversation.id}`), {
-      otherUid: meUid,
-      createdAt: conversation.createdAt,
-    }),
-  ]);
-};
-
-export const ensureConversation = async (
-  me: ChatUser,
-  other: ChatUser,
-): Promise<Conversation> => {
-  if (me.uid === other.uid) {
-    throw createAppError('Não é possível iniciar uma conversa com você mesmo.');
-  }
-
-  if (!canChat(me.provider, other.provider)) {
-    throw createAppError(
-      `Conversa não permitida: contas ${providerLabel(me.provider)} e ${providerLabel(
-        other.provider,
-      )} são do mesmo tipo. Só é possível conversar entre uma conta de e-mail/senha e uma conta social (Google ou Apple).`,
-    );
-  }
-
-  const conversationId: string = buildConversationId(me.uid, other.uid);
-  const conversationRef = ref(database, `conversations/${conversationId}`);
-
-  const initial: ConversationRead = await readConversation(conversationRef, conversationId);
-
-  if (initial.status === 'timeout') {
-    throw createAppError(TIMEOUT_OPEN_MESSAGE);
-  }
-  if (initial.status === 'invalid') {
-    // The node exists but is malformed: creating it again is guaranteed to be
-    // denied by the `!data.exists()` write rule, so fail with a clear reason
-    // instead of a misleading permission error.
-    throw createAppError(BROKEN_CONVERSATION_MESSAGE);
-  }
-  if (initial.status === 'found') {
-    return initial.conversation;
-  }
-
-  const createdAt: number = Date.now();
-  const payload: StoredConversation = {
-    participants: { [me.uid]: true, [other.uid]: true },
-    createdAt,
-  };
-
-  const writeResult: Timed<void> = await runWithDeadline(
-    set(conversationRef, payload),
-    RTDB_TIMEOUT_MS,
-  );
-
-  if (writeResult.status === 'timeout') {
-    throw createAppError(TIMEOUT_OPEN_MESSAGE);
-  }
-
-  if (writeResult.status === 'failed') {
-    // The write rule only allows creation (`!data.exists()`), so a rejection
-    // most likely means the other participant created the conversation first.
-    // Re-read: now that we are a participant the read rule grants access.
-    const afterRace: ConversationRead = await readConversation(conversationRef, conversationId);
-    if (afterRace.status === 'found') {
-      return afterRace.conversation;
-    }
-    if (afterRace.status === 'invalid') {
-      throw createAppError(BROKEN_CONVERSATION_MESSAGE);
-    }
-    if (afterRace.status === 'timeout') {
-      throw createAppError(TIMEOUT_OPEN_MESSAGE);
-    }
-    throw writeResult.error;
-  }
-
-  const participants: [string, string] =
-    me.uid < other.uid ? [me.uid, other.uid] : [other.uid, me.uid];
-  const conversation: Conversation = { id: conversationId, participants, createdAt };
-
-  // The index is written only when the conversation is actually created: it is
-  // immutable afterwards, so rewriting it on every chat open would just add two
-  // round-trips in front of the first render. It is a write-only convenience
-  // model, so a failure here must not block the conversation from opening.
-  await runWithDeadline(
-    writeUserConversationIndex(conversation, me.uid, other.uid),
-    RTDB_TIMEOUT_MS,
-  );
-
-  return conversation;
-};
-
-export const subscribeToRecentMessages = (
-  conversationId: string,
-  limit: number,
-  onChange: (messages: ChatMessage[]) => void,
-  onError: (error: unknown) => void,
-): (() => void) => {
-  const messagesQuery = query(
-    ref(database, `messages/${conversationId}`),
-    orderByChild('createdAt'),
-    limitToLast(limit),
-  );
-
-  const unsubscribe = onValue(
-    messagesQuery,
-    (snapshot) => {
-      const messages: ChatMessage[] = [];
-      snapshot.forEach((child) => {
-        const parsed = parseMessage(child.val());
-        if (parsed !== null) {
-          messages.push(parsed);
-        }
-      });
-      const sorted: ChatMessage[] = [...messages].sort(
-        (a, b) => a.createdAt - b.createdAt,
-      );
-      onChange(sorted);
-    },
-    (error) => {
-      onError(error);
-    },
-  );
-
-  return (): void => {
-    unsubscribe();
-  };
-};
-
-export const subscribeToMessages = (
-  conversationId: string,
-  onChange: (messages: ChatMessage[]) => void,
-  onError: (error: unknown) => void,
-): (() => void) => subscribeToRecentMessages(conversationId, MESSAGES_LIMIT, onChange, onError);
-
-const parseMarks = (value: unknown): ReceiptMarks => {
-  if (typeof value !== 'object' || value === null) {
-    return { deliveredAt: 0, readAt: 0 };
-  }
-  const record: Record<string, unknown> = value as Record<string, unknown>;
-  const deliveredAt: unknown = record.deliveredAt;
-  const readAt: unknown = record.readAt;
-  return {
-    deliveredAt: typeof deliveredAt === 'number' ? deliveredAt : 0,
-    readAt: typeof readAt === 'number' ? readAt : 0,
-  };
-};
-
-/**
- * Subscribes to receipts/$cid — the per-user watermarks of BOTH members.
- * The read rule requires the conversation to exist with me as a participant,
- * so before the first message this errors with PERMISSION_DENIED; callers
- * treat that as "no receipts yet", not a failure.
- */
-export const subscribeToReceipts = (
-  conversationId: string,
-  onChange: (marks: Record<string, ReceiptMarks>) => void,
-  onError: (error: unknown) => void,
-): (() => void) => {
-  const unsubscribe = onValue(
-    ref(database, `receipts/${conversationId}`),
-    (snapshot: DataSnapshot) => {
-      const marks: Record<string, ReceiptMarks> = {};
-      snapshot.forEach((child) => {
-        const key: string | null = child.key;
-        if (key !== null) {
-          marks[key] = parseMarks(child.val());
-        }
-      });
-      onChange(marks);
-    },
-    (error) => {
-      onError(error);
-    },
-  );
-  return (): void => {
-    unsubscribe();
-  };
-};
-
-/**
- * Bumps MY delivered watermark: "my client has received the other user's
- * messages" (app running with a listener attached — WhatsApp's double grey
- * tick). One tiny write regardless of how many messages arrived.
- */
-export const markConversationDelivered = async (
-  conversationId: string,
-  meUid: string,
-): Promise<void> => {
-  const deliveredAt: number = await serverAlignedNow();
-  await update(ref(database, `receipts/${conversationId}/${meUid}`), { deliveredAt });
-};
-
-/**
- * Bumps MY read watermark: "I have the chat open and saw the messages"
- * (WhatsApp's double blue tick). Read implies delivered — both timestamps go
- * in the same write, so "read but never delivered" can never be observed.
- */
-export const markConversationRead = async (
-  conversationId: string,
-  meUid: string,
-): Promise<void> => {
-  const readAt: number = await serverAlignedNow();
-  await update(ref(database, `receipts/${conversationId}/${meUid}`), {
-    deliveredAt: readAt,
-    readAt,
-  });
-};
-
-export const sendMessage = async (params: {
-  conversation: Conversation;
+export type SendMessageParams = {
+  conversationId: string;
+  conversationType: ConversationType;
   senderId: string;
-  receiverId: string;
-  text: string;
-  /**
-   * Fired synchronously with the RTDB-generated key, before any network
-   * await in this function — including before the local optimistic echo
-   * `subscribeToMessages` can possibly raise for this write. Callers can use
-   * this to stamp the id onto their own optimistic state immediately, so
-   * reconciliation never has to guess an in-flight send's identity from its
-   * content.
-   */
+  message: OutgoingMessage;
+  /** Fired synchronously with the RTDB key, before any network await. */
   onLocalId?: (id: string) => void;
-  /**
-   * When set, re-`set()`s the existing message at this id instead of
-   * `push()`-ing a new one. A retry after a deadline timeout must reuse the
-   * original write's location: the timed-out `set()` is NOT cancelled — it
-   * stays queued in the SDK and is committed on reconnect regardless — so a
-   * retry that pushed a fresh key would leave two permanent copies in the
-   * database once both writes eventually land.
-   */
+  /** Retry: re-set the same key instead of pushing a new one. A timed-out
+   * write is not cancelled (it is committed on reconnect), so a retry with a
+   * fresh key would leave two copies. */
   existingId?: string;
-  /**
-   * Fired if and only if this call's `set()` hits the deadline (see
-   * `TIMEOUT_SEND_MESSAGE` below) AND the write later settles anyway — which
-   * it will, since a timed-out write is not cancelled. `delivered` is true on
-   * a late server ack, false on a late definitive rejection. Callers use this
-   * to correct an optimistic "failed" bubble once the true outcome is known,
-   * instead of leaving it wrong forever.
-   */
+  /** Called if a write that hit the deadline settles later anyway. */
   onDeadlineExceededSettled?: (delivered: boolean) => void;
-}): Promise<ChatMessage> => {
-  const { conversation, senderId, receiverId } = params;
-  const text: string = params.text.trim();
+};
 
+export const sendMessage = async (params: SendMessageParams): Promise<ChatMessage> => {
+  const text: string = params.message.text.trim();
   if (text.length === 0) {
     throw createAppError('Digite uma mensagem antes de enviar.');
   }
-  if (text.length > 1000) {
-    throw createAppError('A mensagem deve ter no máximo 1000 caracteres.');
-  }
-  if (senderId === receiverId) {
-    throw createAppError('Não é possível enviar uma mensagem para você mesmo.');
-  }
-  if (!conversation.participants.includes(senderId)) {
-    throw createAppError('Você não faz parte desta conversa.');
-  }
-  if (!conversation.participants.includes(receiverId)) {
-    throw createAppError('O destinatário não faz parte desta conversa.');
+  if (text.length > MAX_MESSAGE_LENGTH) {
+    throw createAppError(`A mensagem deve ter no máximo ${MAX_MESSAGE_LENGTH} caracteres.`);
   }
 
   let messageRef: DatabaseReference;
   let messageId: string;
   if (params.existingId !== undefined) {
     messageId = params.existingId;
-    messageRef = ref(database, `messages/${conversation.id}/${messageId}`);
+    messageRef = ref(database, `messages/${params.conversationId}/${messageId}`);
   } else {
-    const pushedRef = push(ref(database, `messages/${conversation.id}`));
-    const pushedKey: string | null = pushedRef.key;
-    if (pushedKey === null) {
+    const pushed = push(ref(database, `messages/${params.conversationId}`));
+    if (pushed.key === null) {
       throw createAppError('Não foi possível gerar o identificador da mensagem.');
     }
-    messageId = pushedKey;
-    messageRef = pushedRef;
+    messageId = pushed.key;
+    messageRef = pushed;
     params.onLocalId?.(messageId);
   }
 
-  const message: StoredMessage = {
-    id: messageId,
-    conversationId: conversation.id,
-    senderId,
-    receiverId,
+  const mentions: string[] = params.message.mentionedUserIds.filter((uid: string) => uid !== params.senderId);
+  const stored: StoredMessage = {
+    conversationType: params.conversationType,
+    senderId: params.senderId,
     text,
+    target: params.message.target,
     createdAt: await serverAlignedNow(),
+    ...(mentions.length > 0
+      ? { mentionedUserIds: Object.fromEntries(mentions.map((uid: string) => [uid, true as const])) }
+      : {}),
   };
 
-  const writePromise: Promise<void> = set(messageRef, message);
-  const result: Timed<void> = await runWithDeadline(writePromise, RTDB_TIMEOUT_MS);
+  const write: Promise<void> = set(messageRef, stored);
+  const result: Timed<void> = await runWithDeadline(write, RTDB_TIMEOUT_MS);
   if (result.status === 'timeout') {
-    // The write is still outstanding — attach a second observer (promises can
-    // have more than one) so its real, eventual outcome still reaches the
-    // caller after this function has already thrown.
-    writePromise.then(
+    write.then(
       (): void => params.onDeadlineExceededSettled?.(true),
       (): void => params.onDeadlineExceededSettled?.(false),
     );
-    throw createAppError(TIMEOUT_SEND_MESSAGE);
+    throw createAppError('Tempo esgotado ao enviar a mensagem. Verifique sua conexão e tente novamente.');
   }
   if (result.status === 'failed') {
     throw result.error;
   }
-
-  return message;
+  return {
+    id: messageId,
+    conversationId: params.conversationId,
+    conversationType: stored.conversationType,
+    senderId: stored.senderId,
+    text: stored.text,
+    target: stored.target,
+    mentionedUserIds: mentions,
+    createdAt: stored.createdAt,
+  };
 };
+
+// ---- push request (team API) ---------------------------------------------------
+
+export type PushRequestResult =
+  | { status: 'sent' | 'duplicate' | 'no_recipients' | 'no_devices'; recipients: number; delivered: number }
+  | { status: 'failed'; message: string };
+
+const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Asks the API to push a message that is already persisted. Only ids are
+ * sent: the API re-reads the message, checks the sender and computes the
+ * recipients itself. The endpoint is idempotent, so network failures are
+ * retried safely without ever duplicating a notification.
+ */
+export const requestMessagePush = async (conversationId: string, messageId: string): Promise<PushRequestResult> => {
+  let lastMessage = 'Não foi possível enviar a notificação.';
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const body: unknown = await apiRequest('POST', '/notifications/messages', { conversationId, messageId });
+      const status: unknown = isRecord(body) ? body.status : null;
+      const recipients: unknown = isRecord(body) ? body.recipients : 0;
+      const delivered: unknown = isRecord(body) ? body.delivered : 0;
+      if (status === 'sent' || status === 'duplicate' || status === 'no_recipients' || status === 'no_devices') {
+        return {
+          status,
+          recipients: typeof recipients === 'number' ? recipients : 0,
+          delivered: typeof delivered === 'number' ? delivered : 0,
+        };
+      }
+      return { status: 'failed', message: lastMessage };
+    } catch (error: unknown) {
+      if (isApiError(error) && error.status < 500) {
+        return { status: 'failed', message: error.message };
+      }
+      lastMessage = error instanceof Error ? error.message : lastMessage;
+      await wait(800 * (attempt + 1));
+    }
+  }
+  return { status: 'failed', message: lastMessage };
+};
+
+// ---- read marks & connectivity (Realtime Database) -------------------------------
+
+export const markConversationRead = async (conversationId: string, meUid: string): Promise<void> => {
+  await set(ref(database, `readMarks/${conversationId}/${meUid}`), await serverAlignedNow());
+};
+
+export const subscribeToReadMark = (
+  conversationId: string,
+  meUid: string,
+  onChange: (readAt: number) => void,
+): (() => void) =>
+  onValue(
+    ref(database, `readMarks/${conversationId}/${meUid}`),
+    (snapshot: DataSnapshot) => {
+      const raw: unknown = snapshot.val();
+      onChange(typeof raw === 'number' ? raw : 0);
+    },
+    () => onChange(0),
+  );
+
+/** Realtime Database connection state, used for the offline banner. */
+export const subscribeToConnection = (onChange: (connected: boolean) => void): (() => void) =>
+  onValue(ref(database, '.info/connected'), (snapshot: DataSnapshot) => onChange(snapshot.val() === true));

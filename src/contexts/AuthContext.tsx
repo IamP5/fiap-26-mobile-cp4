@@ -1,52 +1,41 @@
-import React, {
-  createContext,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from 'react';
+import React, { createContext, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 
-import { auth } from '../services/firebase';
 import {
-  resolveChatUser,
-  signInWithAppleCredential,
+  INCOMPLETE_PROFILE_MESSAGE,
+  requestPasswordReset,
+  resolveSessionUser,
   signInWithEmail,
-  signInWithGoogleIdToken,
-  signInWithGooglePopup,
   signOutUser,
   signUpWithEmail,
-  syncProviderPhoto,
   updateUserName,
   updateUserPhoto,
   type SignInInput,
   type SignUpInput,
+  type SignUpResult,
 } from '../services/authService';
+import { auth } from '../services/firebase';
+import { unregisterDevice } from '../services/notificationService';
+import type { ChatUser, PickedImage } from '../types/user';
 import { translateFirebaseError } from '../utils/errors';
-import type { ChatUser } from '../types/user';
 
 export type AuthContextValue = {
   user: ChatUser | null;
+  /** True until the persisted session has been checked on app start. */
   initializing: boolean;
   loading: boolean;
   error: string | null;
+  /** Non-blocking info for the user, e.g. a failed photo upload. */
+  notice: string | null;
   signIn: (input: SignInInput) => Promise<void>;
   signUp: (input: SignUpInput) => Promise<void>;
-  signInWithGoogle: (idToken: string) => Promise<void>;
-  signInWithGoogleOnWeb: () => Promise<void>;
-  signInWithApple: (
-    identityToken: string,
-    rawNonce: string,
-    fullName: string | null,
-  ) => Promise<void>;
   signOut: () => Promise<void>;
+  resetPassword: (email: string) => Promise<boolean>;
   clearError: () => void;
-  /** Account settings actions: update context user on success, THROW on
-   * failure so the settings screen can show the error inline. */
+  clearNotice: () => void;
+  /** Profile actions THROW on failure so screens can show the error inline. */
   updateName: (name: string) => Promise<void>;
-  syncPhoto: () => Promise<void>;
-  /** Uploads a locally picked/captured image as the new profile photo. */
-  updatePhoto: (localUri: string, mimeType: string | null) => Promise<void>;
+  updatePhoto: (image: PickedImage) => Promise<void>;
 };
 
 export const AuthContext = createContext<AuthContextValue | null>(null);
@@ -58,11 +47,15 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [initializing, setInitializing] = useState<boolean>(true);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  // While sign-up runs, Auth reports the new account before its Firestore
+  // profile exists; the session observer must not treat that as a broken
+  // account. signUp sets the user itself when it finishes.
+  const signingUpRef = useRef<boolean>(false);
 
   useEffect(() => {
     let active = true;
-
-    const unsubscribe: () => void = onAuthStateChanged(
+    const unsubscribe = onAuthStateChanged(
       auth,
       (firebaseUser: User | null): void => {
         if (firebaseUser === null) {
@@ -72,12 +65,21 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           }
           return;
         }
-
-        void resolveChatUser(firebaseUser)
-          .then((chatUser: ChatUser): void => {
-            if (active) {
-              setUser(chatUser);
+        if (signingUpRef.current) {
+          return;
+        }
+        resolveSessionUser(firebaseUser)
+          .then(async (chatUser: ChatUser | null): Promise<void> => {
+            if (!active || signingUpRef.current) {
+              return;
             }
+            if (chatUser === null) {
+              await signOutUser().catch(() => undefined);
+              setUser(null);
+              setError(INCOMPLETE_PROFILE_MESSAGE);
+              return;
+            }
+            setUser(chatUser);
           })
           .catch((resolveError: unknown): void => {
             if (active) {
@@ -98,108 +100,58 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
       },
     );
-
     return (): void => {
       active = false;
       unsubscribe();
     };
   }, []);
 
-  const clearError = useCallback((): void => {
+  const signIn = useCallback(async (input: SignInInput): Promise<void> => {
+    setLoading(true);
     setError(null);
+    try {
+      setUser(await signInWithEmail(input));
+    } catch (signInError: unknown) {
+      setError(translateFirebaseError(signInError));
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  const runAction = useCallback(
-    async (action: () => Promise<ChatUser>): Promise<void> => {
-      setLoading(true);
-      setError(null);
-      try {
-        const chatUser: ChatUser = await action();
-        setUser(chatUser);
-      } catch (actionError: unknown) {
-        setError(translateFirebaseError(actionError));
-      } finally {
-        setLoading(false);
+  const signUp = useCallback(async (input: SignUpInput): Promise<void> => {
+    setLoading(true);
+    setError(null);
+    signingUpRef.current = true;
+    try {
+      const result: SignUpResult = await signUpWithEmail(input);
+      setUser(result.user);
+      if (result.photoFailed) {
+        setNotice('Conta criada, mas não foi possível enviar a foto. Tente de novo na aba "Você".');
       }
-    },
-    [],
-  );
-
-  const signIn = useCallback(
-    async (input: SignInInput): Promise<void> => {
-      await runAction((): Promise<ChatUser> => signInWithEmail(input));
-    },
-    [runAction],
-  );
-
-  const signUp = useCallback(
-    async (input: SignUpInput): Promise<void> => {
-      await runAction((): Promise<ChatUser> => signUpWithEmail(input));
-    },
-    [runAction],
-  );
-
-  const signInWithGoogle = useCallback(
-    async (idToken: string): Promise<void> => {
-      await runAction((): Promise<ChatUser> => signInWithGoogleIdToken(idToken));
-    },
-    [runAction],
-  );
-
-  const signInWithGoogleOnWeb = useCallback(async (): Promise<void> => {
-    await runAction((): Promise<ChatUser> => signInWithGooglePopup());
-  }, [runAction]);
-
-  const signInWithApple = useCallback(
-    async (
-      identityToken: string,
-      rawNonce: string,
-      fullName: string | null,
-    ): Promise<void> => {
-      await runAction(
-        (): Promise<ChatUser> =>
-          signInWithAppleCredential(identityToken, rawNonce, fullName),
-      );
-    },
-    [runAction],
-  );
-
-  const updateName = useCallback(
-    async (name: string): Promise<void> => {
-      if (user === null) {
-        return;
-      }
-      const updated: ChatUser = await updateUserName(user, name);
-      setUser(updated);
-    },
-    [user],
-  );
-
-  const syncPhoto = useCallback(async (): Promise<void> => {
-    if (user === null) {
-      return;
+    } catch (signUpError: unknown) {
+      setError(translateFirebaseError(signUpError));
+      // A half-created account stays signed out; signing up again with the
+      // same credentials completes it.
+      await signOutUser().catch(() => undefined);
+    } finally {
+      signingUpRef.current = false;
+      setLoading(false);
     }
-    const updated: ChatUser = await syncProviderPhoto(user);
-    setUser(updated);
-  }, [user]);
-
-  const updatePhoto = useCallback(
-    async (localUri: string, mimeType: string | null): Promise<void> => {
-      if (user === null) {
-        return;
-      }
-      const updated: ChatUser = await updateUserPhoto(user, localUri, mimeType);
-      setUser(updated);
-    },
-    [user],
-  );
+  }, []);
 
   const signOut = useCallback(async (): Promise<void> => {
     setLoading(true);
     setError(null);
     try {
+      const current = auth.currentUser;
+      if (current !== null) {
+        // Stop pushes to this phone before the session (and the permission
+        // to delete the device document) goes away.
+        await unregisterDevice(current.uid);
+      }
       await signOutUser();
       setUser(null);
+      setNotice(null);
     } catch (signOutError: unknown) {
       setError(translateFirebaseError(signOutError));
     } finally {
@@ -207,39 +159,56 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     }
   }, []);
 
+  const resetPassword = useCallback(async (email: string): Promise<boolean> => {
+    setError(null);
+    try {
+      await requestPasswordReset(email);
+      setNotice('Se houver uma conta com esse e-mail, enviamos um link para redefinir a senha.');
+      return true;
+    } catch (resetError: unknown) {
+      setError(translateFirebaseError(resetError));
+      return false;
+    }
+  }, []);
+
+  const clearError = useCallback((): void => setError(null), []);
+  const clearNotice = useCallback((): void => setNotice(null), []);
+
+  const updateName = useCallback(
+    async (name: string): Promise<void> => {
+      if (user !== null) {
+        setUser(await updateUserName(user, name));
+      }
+    },
+    [user],
+  );
+
+  const updatePhoto = useCallback(
+    async (image: PickedImage): Promise<void> => {
+      if (user !== null) {
+        setUser(await updateUserPhoto(user, image));
+      }
+    },
+    [user],
+  );
+
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
       initializing,
       loading,
       error,
+      notice,
       signIn,
       signUp,
-      signInWithGoogle,
-      signInWithGoogleOnWeb,
-      signInWithApple,
       signOut,
+      resetPassword,
       clearError,
+      clearNotice,
       updateName,
-      syncPhoto,
       updatePhoto,
     }),
-    [
-      user,
-      initializing,
-      loading,
-      error,
-      signIn,
-      signUp,
-      signInWithGoogle,
-      signInWithGoogleOnWeb,
-      signInWithApple,
-      signOut,
-      clearError,
-      updateName,
-      syncPhoto,
-      updatePhoto,
-    ],
+    [user, initializing, loading, error, notice, signIn, signUp, signOut, resetPassword, clearError, clearNotice, updateName, updatePhoto],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

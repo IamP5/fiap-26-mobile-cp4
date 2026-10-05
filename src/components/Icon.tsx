@@ -20,7 +20,9 @@ export type IconName =
   | 'close'
   | 'plus'
   | 'chat'
-  | 'settings';
+  | 'settings'
+  | 'group'
+  | 'camera';
 
 export type IconProps = {
   name: IconName;
@@ -358,6 +360,73 @@ const renderGlyph = (name: IconName, size: number, color: string, strokeWidth: n
               />
             </React.Fragment>
           ))}
+        </View>
+      );
+    }
+    case 'group': {
+      // Two head-and-shoulders silhouettes, the back one offset and dimmed.
+      const head: number = size * 0.32;
+      const body: number = size * 0.56;
+      const person = (left: number, opacity: number): React.ReactNode => (
+        <View key={left} style={{ position: 'absolute', left, top: size * 0.1, alignItems: 'center', opacity }}>
+          <View style={{ width: head, height: head, borderRadius: head / 2, backgroundColor: color }} />
+          <View
+            style={{
+              marginTop: size * 0.06,
+              width: body,
+              height: body * 0.5,
+              borderTopLeftRadius: body / 2,
+              borderTopRightRadius: body / 2,
+              backgroundColor: color,
+            }}
+          />
+        </View>
+      );
+      return (
+        <View style={{ width: size, height: size }}>
+          {person(size * 0.38, 0.55)}
+          {person(size * 0.02, 1)}
+        </View>
+      );
+    }
+    case 'camera': {
+      // Rounded body with a lens ring and a small viewfinder bump on top.
+      const bodyHeight: number = size * 0.62;
+      const lens: number = size * 0.34;
+      return (
+        <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'flex-end' }}>
+          <View
+            style={{
+              position: 'absolute',
+              top: size * 0.12,
+              width: size * 0.36,
+              height: size * 0.18,
+              borderTopLeftRadius: 3,
+              borderTopRightRadius: 3,
+              backgroundColor: color,
+            }}
+          />
+          <View
+            style={{
+              width: size * 0.92,
+              height: bodyHeight,
+              marginBottom: size * 0.08,
+              borderRadius: size * 0.16,
+              backgroundColor: color,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <View
+              style={{
+                width: lens,
+                height: lens,
+                borderRadius: lens / 2,
+                borderWidth: Math.max(strokeWidth, 2),
+                borderColor: 'rgba(255,255,255,0.9)',
+              }}
+            />
+          </View>
         </View>
       );
     }

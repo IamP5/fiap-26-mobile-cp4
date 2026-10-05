@@ -1,31 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
-  ensureConversation,
+  ensureDirectConversation,
   markConversationRead,
+  requestMessagePush,
   sendMessage,
   subscribeToMessages,
-  subscribeToReceipts,
+  type PushRequestResult,
 } from '../services/chatService';
-import type { ChatMessage, Conversation, DisplayMessage, ReceiptMarks } from '../types/chat';
-import type { ChatUser } from '../types/user';
-import { createAppError, translateFirebaseError } from '../utils/errors';
+import type { ChatMessage, ConversationType, DisplayMessage, OutgoingMessage } from '../types/chat';
+import { otherParticipant } from '../utils/conversationId';
+import { translateFirebaseError } from '../utils/errors';
 
 /**
- * One optimistic, not-yet-settled send. `serverId` is stamped synchronously
- * from `sendMessage`'s `onLocalId` callback — i.e. before the write's promise
- * settles, and before RTDB's own local echo of that write can possibly reach
- * `subscribeToMessages`. The entry is removed ONLY when `sendMessage` itself
- * resolves (a real server ack), never by pattern-matching the server
- * snapshot: a message appearing in that snapshot is not proof of delivery —
- * RTDB raises the local echo for a write it has queued but not yet acked, so
- * treating "present in the snapshot" as "delivered" would mark a send
- * confirmed (and delete its retry affordance) while it is still in flight or
- * about to fail.
+ * One optimistic send. `serverId` is stamped synchronously with the RTDB key
+ * (before the write settles), and the entry is dropped only when the write
+ * is acknowledged by the server — an RTDB local echo is not proof of delivery.
  */
 type PendingEntry = {
   localId: string;
-  text: string;
+  message: OutgoingMessage;
   createdAt: number;
   status: 'sending' | 'failed';
   serverId?: string;
@@ -33,331 +27,279 @@ type PendingEntry = {
 
 export type UseChatResult = {
   messages: DisplayMessage[];
-  conversation: Conversation | null;
   loading: boolean;
   error: string | null;
-  /** The OTHER user's receipt watermarks — drive the ticks on my messages. */
-  otherDeliveredAt: number;
-  otherReadAt: number;
-  send: (text: string) => void;
+  /** The user lost access (removed from the group or group deleted). */
+  accessLost: boolean;
+  /** Message saved but the push request failed. Non-blocking. */
+  pushWarning: string | null;
+  dismissPushWarning: () => void;
+  send: (message: OutgoingMessage) => void;
   resend: (localId: string) => void;
-  retryInit: () => void;
+  retry: () => void;
 };
 
-const EMPTY_MARKS: ReceiptMarks = { deliveredAt: 0, readAt: 0 };
-
-/** Deadline for the first `onValue` payload of a conversation's messages. */
 const FIRST_SNAPSHOT_TIMEOUT_MS = 12000;
 
-const FIRST_SNAPSHOT_TIMEOUT_MESSAGE =
-  'Tempo esgotado ao carregar as mensagens. Verifique sua conexão e tente novamente.';
+const isPermissionDenied = (error: unknown): boolean => {
+  const text: string = error instanceof Error ? error.message : String(error);
+  return /permission[_ ]denied/i.test(text);
+};
 
-export const useChat = (me: ChatUser, other: ChatUser): UseChatResult => {
-  const [conversation, setConversation] = useState<Conversation | null>(null);
+/**
+ * Messages of one conversation, live from the Realtime Database. The listener
+ * is replaced when the conversation changes and removed on unmount. After each
+ * persisted message, the API is asked to push it.
+ */
+export const useChat = (
+  conversationId: string,
+  conversationType: ConversationType,
+  meUid: string,
+  canSend: boolean,
+): UseChatResult => {
+  const [ready, setReady] = useState<boolean>(false);
   const [serverMessages, setServerMessages] = useState<ChatMessage[]>([]);
-  const [marks, setMarks] = useState<Record<string, ReceiptMarks>>({});
   const [pending, setPending] = useState<PendingEntry[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [accessLost, setAccessLost] = useState<boolean>(false);
+  const [pushWarning, setPushWarning] = useState<string | null>(null);
   const [retryToken, setRetryToken] = useState<number>(0);
 
   const mountedRef = useRef<boolean>(true);
-  // The screens rebuild `me`/`other` on every render, so the effects below key
-  // off the uids while always reading the freshest objects from these refs.
-  const meRef = useRef<ChatUser>(me);
-  const otherRef = useRef<ChatUser>(other);
-  const conversationRef = useRef<Conversation | null>(null);
-  const pendingCounterRef = useRef<number>(0);
-
-  useEffect(() => {
-    meRef.current = me;
-    otherRef.current = other;
-  }, [me, other]);
-
-  useEffect(() => {
-    conversationRef.current = conversation;
-  }, [conversation]);
+  const counterRef = useRef<number>(0);
 
   useEffect(() => {
     mountedRef.current = true;
-    return (): void => {
+    return () => {
       mountedRef.current = false;
     };
   }, []);
 
-  const meUid: string = me.uid;
-  const otherUid: string = other.uid;
-
+  // Direct conversations need their Firestore document (it is what the API
+  // checks before pushing, and what lets both users see each other's
+  // profile). Creating it is idempotent.
   useEffect(() => {
     let active = true;
+    setReady(false);
     setLoading(true);
     setError(null);
-    setConversation(null);
-    setServerMessages(() => []);
-    setPending(() => []);
+    setAccessLost(false);
+    setServerMessages([]);
+    setPending([]);
 
-    ensureConversation(meRef.current, otherRef.current)
-      .then((created) => {
-        if (!active) {
-          return;
+    if (conversationType === 'group') {
+      setReady(true);
+      return undefined;
+    }
+    const otherUid: string | null = otherParticipant(conversationId, meUid);
+    if (otherUid === null) {
+      setError('Conversa inválida.');
+      setLoading(false);
+      return undefined;
+    }
+    ensureDirectConversation(meUid, otherUid)
+      .then(() => {
+        if (active) {
+          setReady(true);
         }
-        // `loading` stays true until the first message snapshot arrives so the
-        // "Nenhuma mensagem ainda" empty state is never shown for a conversation
-        // that actually has history.
-        setConversation(created);
       })
       .catch((initError: unknown) => {
-        if (!active) {
-          return;
+        if (active) {
+          setError(translateFirebaseError(initError));
+          setLoading(false);
         }
-        setError(translateFirebaseError(initError));
-        setLoading(false);
       });
-
-    return (): void => {
+    return () => {
       active = false;
     };
-  }, [meUid, otherUid, retryToken, meRef, otherRef]);
-
-  const conversationId: string | null =
-    conversation === null ? null : conversation.id;
+  }, [conversationId, conversationType, meUid, retryToken]);
 
   useEffect(() => {
-    if (conversationId === null) {
-      return;
+    if (!ready) {
+      return undefined;
     }
-
     let active = true;
-
-    const timer = setTimeout((): void => {
-      if (!active) {
-        return;
+    const timer = setTimeout(() => {
+      if (active) {
+        setError('Tempo esgotado ao carregar as mensagens. Verifique sua conexão e tente novamente.');
+        setLoading(false);
       }
-      setError(translateFirebaseError(createAppError(FIRST_SNAPSHOT_TIMEOUT_MESSAGE)));
-      setLoading(false);
     }, FIRST_SNAPSHOT_TIMEOUT_MS);
 
     const unsubscribe = subscribeToMessages(
       conversationId,
-      (next) => {
+      (next: ChatMessage[]) => {
         if (!active) {
           return;
         }
         clearTimeout(timer);
-        setServerMessages(() => [...next]);
+        setServerMessages(next);
         setError(null);
         setLoading(false);
       },
-      (subscriptionError) => {
+      (subscriptionError: unknown) => {
         if (!active) {
           return;
         }
         clearTimeout(timer);
-        setError(translateFirebaseError(subscriptionError));
+        if (isPermissionDenied(subscriptionError)) {
+          setAccessLost(true);
+        } else {
+          setError(translateFirebaseError(subscriptionError));
+        }
         setLoading(false);
       },
     );
-
-    return (): void => {
+    return () => {
       active = false;
       clearTimeout(timer);
       unsubscribe();
     };
-  }, [conversationId]);
+  }, [conversationId, ready]);
 
+  // Read mark: newest message from someone else that I have now seen.
+  const lastMarkedRef = useRef<number>(0);
   useEffect(() => {
-    if (conversationId === null) {
-      return;
-    }
-    setMarks(() => ({}));
-    // Receipt errors are non-fatal by design: before the conversation node
-    // exists the read rule denies this subscription, which just means "no
-    // receipts yet" — ticks render as plain sent.
-    const unsubscribe = subscribeToReceipts(
-      conversationId,
-      (next) => setMarks(() => ({ ...next })),
-      () => {},
-    );
-    return (): void => {
-      unsubscribe();
-    };
+    lastMarkedRef.current = 0;
   }, [conversationId]);
-
-  // Read watermark: while this chat is open (this hook only lives while the
-  // chat screen is mounted), any message from the other user newer than my
-  // readAt bumps it — one write per incoming burst, guarded by the ref so a
-  // slow round-trip doesn't loop.
-  const lastMarkedReadRef = useRef<number>(0);
-  const myReadAt: number = marks[meUid]?.readAt ?? 0;
-
   useEffect(() => {
-    if (conversationId === null) {
-      return;
-    }
-    const latestFromOther: number = serverMessages.reduce(
-      (max, m) => (m.senderId === otherUid && m.createdAt > max ? m.createdAt : max),
+    const latestFromOthers: number = serverMessages.reduce(
+      (max: number, m: ChatMessage) => (m.senderId !== meUid && m.createdAt > max ? m.createdAt : max),
       0,
     );
-    if (latestFromOther > Math.max(myReadAt, lastMarkedReadRef.current)) {
-      lastMarkedReadRef.current = latestFromOther;
-      markConversationRead(conversationId, meUid).catch(() => {});
+    if (latestFromOthers > lastMarkedRef.current) {
+      lastMarkedRef.current = latestFromOthers;
+      markConversationRead(conversationId, meUid).catch(() => undefined);
     }
-  }, [conversationId, serverMessages, myReadAt, meUid, otherUid]);
+  }, [conversationId, serverMessages, meUid]);
+
+  const markFailed = useCallback((localId: string): void => {
+    setPending((prev: PendingEntry[]) =>
+      prev.map((p: PendingEntry) => (p.localId === localId ? { ...p, status: 'failed' } : p)),
+    );
+  }, []);
+
+  const notifyServer = useCallback(
+    (messageId: string): void => {
+      void requestMessagePush(conversationId, messageId).then((result: PushRequestResult) => {
+        if (mountedRef.current && result.status === 'failed') {
+          setPushWarning(`Mensagem enviada, mas a notificação falhou: ${result.message}`);
+        }
+      });
+    },
+    [conversationId],
+  );
 
   const attemptSend = useCallback(
-    (localId: string, text: string, existingId?: string): void => {
-      const conv: Conversation | null = conversationRef.current;
-      if (conv === null) {
-        setPending((prev) =>
-          prev.map((p) => (p.localId === localId ? { ...p, status: 'failed' } : p)),
-        );
-        return;
-      }
+    (localId: string, message: OutgoingMessage, existingId?: string): void => {
       sendMessage({
-        conversation: conv,
+        conversationId,
+        conversationType,
         senderId: meUid,
-        receiverId: otherUid,
-        text,
-        // A retry reuses the original write's location instead of pushing a
-        // fresh key — see the `existingId` doc in chatService.ts for why.
+        message,
         existingId,
-        // Stamped synchronously, before the write is even issued — see the
-        // PendingEntry comment above for why this must not wait on the
-        // subscription snapshot.
-        onLocalId: (id) => {
-          if (!mountedRef.current) {
-            return;
+        onLocalId: (id: string) => {
+          if (mountedRef.current) {
+            setPending((prev: PendingEntry[]) =>
+              prev.map((p: PendingEntry) => (p.localId === localId ? { ...p, serverId: id } : p)),
+            );
           }
-          setPending((prev) =>
-            prev.map((p) => (p.localId === localId ? { ...p, serverId: id } : p)),
-          );
         },
-        // A `set()` that hit the 12s deadline is NOT cancelled — it is still
-        // queued and will be committed on reconnect. Without this, a send
-        // that times out while offline and is later flushed from RTDB's
-        // queue would stay a permanent "failed" bubble forever even though
-        // the recipient actually received it. Only a genuine late ack
-        // retires the entry; a late definitive rejection leaves it 'failed'
-        // so the retry affordance stays available.
-        onDeadlineExceededSettled: (delivered) => {
-          if (!mountedRef.current || !delivered) {
-            return;
+        onDeadlineExceededSettled: (delivered: boolean) => {
+          if (mountedRef.current && delivered) {
+            setPending((prev: PendingEntry[]) => prev.filter((p: PendingEntry) => p.localId !== localId));
           }
-          setPending((prev) => prev.filter((p) => p.localId !== localId));
         },
       })
-        .then(() => {
+        .then((saved: ChatMessage) => {
           if (!mountedRef.current) {
             return;
           }
-          // A real server ack — and only a real server ack — retires the
-          // optimistic entry. The confirmed message then renders straight
-          // from `serverMessages` (status undefined, i.e. the check glyph).
-          setPending((prev) => prev.filter((p) => p.localId !== localId));
+          setPending((prev: PendingEntry[]) => prev.filter((p: PendingEntry) => p.localId !== localId));
+          // Persisted first, pushed second: the API re-reads the message.
+          notifyServer(saved.id);
         })
         .catch(() => {
-          if (!mountedRef.current) {
-            return;
+          if (mountedRef.current) {
+            markFailed(localId);
           }
-          setPending((prev) =>
-            prev.map((p) => (p.localId === localId ? { ...p, status: 'failed' } : p)),
-          );
         });
     },
-    [meUid, otherUid],
+    [conversationId, conversationType, meUid, markFailed, notifyServer],
   );
 
   const send = useCallback(
-    (text: string): void => {
-      const trimmed: string = text.trim();
-      if (trimmed.length === 0) {
+    (message: OutgoingMessage): void => {
+      const text: string = message.text.trim();
+      if (text.length === 0) {
         return;
       }
-      pendingCounterRef.current += 1;
-      const localId = `local-${pendingCounterRef.current}`;
-      const createdAt: number = Date.now();
-      const conversationReady: boolean = conversationRef.current !== null;
-
-      setPending((prev) => [
-        ...prev,
-        { localId, text: trimmed, createdAt, status: conversationReady ? 'sending' : 'failed' },
-      ]);
-
-      // A conversation that is not ready yet still gets a bubble — it just
-      // starts (and stays) failed instead of being attempted, so the user's
-      // text lives in a retryable bubble instead of a toast.
-      if (conversationReady) {
-        attemptSend(localId, trimmed);
+      counterRef.current += 1;
+      const localId = `local-${counterRef.current}`;
+      const entry: PendingEntry = {
+        localId,
+        message: { ...message, text },
+        createdAt: Date.now(),
+        status: ready && canSend ? 'sending' : 'failed',
+      };
+      setPending((prev: PendingEntry[]) => [...prev, entry]);
+      if (ready && canSend) {
+        attemptSend(localId, entry.message);
       }
     },
-    [attemptSend],
+    [attemptSend, ready, canSend],
   );
 
   const resend = useCallback(
     (localId: string): void => {
-      setPending((prev) => {
-        const entry = prev.find((p) => p.localId === localId);
-        if (entry === undefined) {
-          return prev;
-        }
-        // Fire the retry outside the updater (state setters must stay pure),
-        // reading the text and the already-stamped serverId captured above —
-        // reusing it (rather than letting sendMessage push a new key) is what
-        // keeps a retry from writing a second, duplicate message once the
-        // original timed-out write also lands.
-        const existingId = entry.serverId;
-        queueMicrotask((): void => {
-          attemptSend(localId, entry.text, existingId);
-        });
-        return prev.map((p) => (p.localId === localId ? { ...p, status: 'sending' } : p));
-      });
+      const entry: PendingEntry | undefined = pending.find((p: PendingEntry) => p.localId === localId);
+      if (entry === undefined || !canSend) {
+        return;
+      }
+      setPending((prev: PendingEntry[]) =>
+        prev.map((p: PendingEntry) => (p.localId === localId ? { ...p, status: 'sending' } : p)),
+      );
+      attemptSend(localId, entry.message, entry.serverId);
     },
-    [attemptSend],
+    [attemptSend, pending, canSend],
   );
 
-  const retryInit = useCallback((): void => {
-    setRetryToken((prev) => prev + 1);
-  }, []);
+  const retry = useCallback((): void => setRetryToken((prev: number) => prev + 1), []);
+  const dismissPushWarning = useCallback((): void => setPushWarning(null), []);
 
   const messages = useMemo<DisplayMessage[]>(() => {
-    // A pending entry with a `serverId` may already have an RTDB local echo
-    // sitting in `serverMessages` — that echo is not proof of delivery (see
-    // the PendingEntry comment), so while the send is still unacked the
-    // pending bubble stays authoritative and its server-side twin is hidden
-    // to avoid rendering both.
-    const unackedServerIds = new Set(
-      pending.map((p) => p.serverId).filter((id): id is string => id !== undefined),
+    // While a send is unacknowledged its pending bubble is authoritative, so
+    // the RTDB local echo with the same id is hidden.
+    const unacked = new Set(
+      pending.map((p: PendingEntry) => p.serverId).filter((id): id is string => id !== undefined),
     );
-    const serverPart: DisplayMessage[] = serverMessages.filter(
-      (m) => !unackedServerIds.has(m.id),
-    );
-    const pendingPart: DisplayMessage[] = pending.map((p) => ({
+    const confirmed: DisplayMessage[] = serverMessages.filter((m: ChatMessage) => !unacked.has(m.id));
+    const optimistic: DisplayMessage[] = pending.map((p: PendingEntry) => ({
       id: p.serverId ?? p.localId,
-      conversationId: conversationRef.current?.id ?? '',
+      conversationId,
+      conversationType,
       senderId: meUid,
-      receiverId: otherUid,
-      text: p.text,
+      text: p.message.text,
+      target: p.message.target,
+      mentionedUserIds: p.message.mentionedUserIds,
       createdAt: p.createdAt,
       status: p.status,
       localId: p.localId,
     }));
-    return [...serverPart, ...pendingPart].sort((a, b) => a.createdAt - b.createdAt);
-  }, [serverMessages, pending, meUid, otherUid]);
+    return [...confirmed, ...optimistic].sort((a, b) => a.createdAt - b.createdAt);
+  }, [serverMessages, pending, conversationId, conversationType, meUid]);
 
-  const otherMarks: ReceiptMarks = marks[otherUid] ?? EMPTY_MARKS;
-
-  return useMemo<UseChatResult>(
-    () => ({
-      messages,
-      conversation,
-      loading,
-      error,
-      otherDeliveredAt: otherMarks.deliveredAt,
-      otherReadAt: otherMarks.readAt,
-      send,
-      resend,
-      retryInit,
-    }),
-    [messages, conversation, loading, error, otherMarks.deliveredAt, otherMarks.readAt, send, resend, retryInit],
-  );
+  return {
+    messages,
+    loading,
+    error,
+    accessLost,
+    pushWarning,
+    dismissPushWarning,
+    send,
+    resend,
+    retry,
+  };
 };
+

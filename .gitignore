@@ -39,3 +39,10 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# app env (only public values; see .env.example)
+.env
+server/.env
+
+# emulator logs
+*-debug.log

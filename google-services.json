@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "749989544702",
+    "firebase_url": "https://fiap-mobile-9eaf0-default-rtdb.firebaseio.com",
+    "project_id": "fiap-mobile-9eaf0",
+    "storage_bucket": "fiap-mobile-9eaf0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:749989544702:android:134684dc7c28a5935a1baf",
+        "android_client_info": {
+          "package_name": "com.fiap.cp4chat"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "749989544702-idhll2mmuplv035bo72iv8nadtbon9as.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDJV9PsJT6II6ScBoGPgUlDq3creUK8CEc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "749989544702-idhll2mmuplv035bo72iv8nadtbon9as.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "749989544702-jsq0h932vfr5vkjqr6has68cbtol35as.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.fiap.cp4chat"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

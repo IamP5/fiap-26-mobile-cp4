@@ -1,3 +1,4 @@
+import * as ImagePicker from 'expo-image-picker';
 import {
   deleteObject,
   getDownloadURL,
@@ -6,23 +7,66 @@ import {
   type StorageReference,
 } from 'firebase/storage';
 
-import { storage } from './firebase';
+import type { PickedImage } from '../types/user';
 import { createAppError } from '../utils/errors';
+import { storage } from './firebase';
 
-const PROFILE_PHOTOS_PATH = 'profile-photos';
+/**
+ * Photos are uploaded to Firebase Storage; only the resulting download URL
+ * is saved in Firestore (never Base64).
+ *   profile-photos/{uid}/<timestamp>.<ext>
+ *   group-photos/{ownerUid}/<timestamp>.<ext>
+ */
+export type PhotoFolder = 'profile-photos' | 'group-photos';
 
-/** Mirrors the 5 MB cap enforced by storage.rules so oversized picks fail
- * with a friendly message instead of a permission error. */
+/** Mirrors the 5 MB cap in storage.rules. */
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 
-const extensionForContentType = (contentType: string): string => {
+export type PhotoSource = 'library' | 'camera';
+
+export type PickResult =
+  | { status: 'picked'; image: PickedImage }
+  | { status: 'canceled' }
+  | { status: 'denied'; message: string };
+
+/** Asks for the needed permission, then opens the gallery or the camera. */
+export const pickPhoto = async (source: PhotoSource): Promise<PickResult> => {
+  const permission =
+    source === 'camera'
+      ? await ImagePicker.requestCameraPermissionsAsync()
+      : await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!permission.granted) {
+    return {
+      status: 'denied',
+      message:
+        source === 'camera'
+          ? 'Permita o acesso à câmera nas configurações do aparelho para tirar uma foto.'
+          : 'Permita o acesso às fotos nas configurações do aparelho para escolher uma imagem.',
+    };
+  }
+  const options: ImagePicker.ImagePickerOptions = {
+    mediaTypes: ['images'],
+    allowsEditing: true,
+    aspect: [1, 1],
+    quality: 0.7,
+  };
+  const result =
+    source === 'camera'
+      ? await ImagePicker.launchCameraAsync(options)
+      : await ImagePicker.launchImageLibraryAsync(options);
+  const asset = result.canceled ? undefined : result.assets[0];
+  if (asset === undefined) {
+    return { status: 'canceled' };
+  }
+  return { status: 'picked', image: { uri: asset.uri, mimeType: asset.mimeType ?? null } };
+};
+
+const extensionFor = (contentType: string): string => {
   switch (contentType) {
     case 'image/png':
       return 'png';
     case 'image/webp':
       return 'webp';
-    case 'image/gif':
-      return 'gif';
     case 'image/heic':
       return 'heic';
     default:
@@ -30,23 +74,10 @@ const extensionForContentType = (contentType: string): string => {
   }
 };
 
-const resolveContentType = (mimeType: string | null, blobType: string): string => {
-  const candidate: string = mimeType ?? blobType;
-  return candidate.startsWith('image/') ? candidate : 'image/jpeg';
-};
-
-/**
- * Uploads the picked/captured image (a local `file://`/`blob:` uri from
- * expo-image-picker) to profile-photos/$uid and returns its download url.
- * The filename is timestamped so a replaced photo gets a NEW url — cached
- * <Image> components would otherwise keep showing the old bytes.
- */
-export const uploadProfilePhoto = async (
-  uid: string,
-  localUri: string,
-  mimeType: string | null,
-): Promise<string> => {
-  const response: Response = await fetch(localUri);
+/** Uploads a picked image and returns its download URL. Timestamped names
+ * give a replaced photo a NEW url, so cached images never show stale bytes. */
+export const uploadPhoto = async (folder: PhotoFolder, uid: string, image: PickedImage): Promise<string> => {
+  const response: Response = await fetch(image.uri);
   if (!response.ok) {
     throw createAppError('Não foi possível ler a imagem selecionada. Tente novamente.');
   }
@@ -54,34 +85,25 @@ export const uploadProfilePhoto = async (
   if (blob.size > MAX_PHOTO_BYTES) {
     throw createAppError('A imagem é muito grande (máximo de 5 MB). Escolha outra foto.');
   }
-  const contentType: string = resolveContentType(mimeType, blob.type);
-  const path: string = `${PROFILE_PHOTOS_PATH}/${uid}/${Date.now()}.${extensionForContentType(contentType)}`;
-  const target: StorageReference = storageRef(storage, path);
+  const candidate: string = image.mimeType ?? blob.type;
+  const contentType: string = candidate.startsWith('image/') ? candidate : 'image/jpeg';
+  const target: StorageReference = storageRef(
+    storage,
+    `${folder}/${uid}/${Date.now()}.${extensionFor(contentType)}`,
+  );
   await uploadBytes(target, blob, { contentType });
   return getDownloadURL(target);
 };
 
-/** True when the url points at an object this app uploaded for this uid
- * (provider photos live on Google's CDN and must never be "cleaned up"). */
-const isOwnProfilePhotoUrl = (uid: string, url: string): boolean =>
-  url.includes(`/${PROFILE_PHOTOS_PATH}%2F${uid}%2F`) ||
-  url.includes(`/${PROFILE_PHOTOS_PATH}/${uid}/`);
-
-/**
- * Best-effort removal of a replaced upload so the bucket doesn't accumulate
- * one orphan per photo change. Never throws: the new photo is already live,
- * and a leftover object is harmless.
- */
-export const deleteProfilePhotoByUrl = async (
-  uid: string,
-  url: string | null,
-): Promise<void> => {
-  if (url === null || !isOwnProfilePhotoUrl(uid, url)) {
+/** Best-effort cleanup of a replaced upload; never throws. */
+export const deletePhotoByUrl = async (folder: PhotoFolder, uid: string, url: string): Promise<void> => {
+  const ours: boolean = url.includes(`/${folder}%2F${uid}%2F`);
+  if (!ours) {
     return;
   }
   try {
     await deleteObject(storageRef(storage, url));
   } catch {
-    // orphaned objects are acceptable; deletion is purely housekeeping
+    // an orphaned object is harmless
   }
 };

@@ -3,6 +3,7 @@ import { Image, StyleSheet, Text, View } from 'react-native';
 
 import { useThemeColors } from '../theme/ThemeContext';
 import { layout, maxFontScale } from '../theme/theme';
+import { Icon } from './Icon';
 
 // Lifted verbatim from the previous UserItem implementation so both the
 // contact list and chat bubbles share the exact same fallback rules.
@@ -37,9 +38,12 @@ export const avatarColorFor = (uid: string, palette: readonly string[]): string 
 export type AvatarProps = {
   name: string;
   uid: string;
-  /** Provider photo (Google account picture); null/undefined = initials. */
+  /** Storage download URL; empty, missing or failing = default image. */
   photoUrl?: string | null;
   size?: number;
+  /** Default image when there is no photo: initials for people, a group
+   * glyph for groups. */
+  variant?: 'person' | 'group';
 };
 
 export const Avatar: React.FC<AvatarProps> = ({
@@ -47,6 +51,7 @@ export const Avatar: React.FC<AvatarProps> = ({
   uid,
   photoUrl,
   size = layout.avatar.md,
+  variant = 'person',
 }: AvatarProps) => {
   const colors = useThemeColors();
   const initials: string = useMemo(() => initialsOf(name), [name]);
@@ -82,6 +87,8 @@ export const Avatar: React.FC<AvatarProps> = ({
           onError={handlePhotoError}
           accessibilityIgnoresInvertColors
         />
+      ) : variant === 'group' ? (
+        <Icon name="group" size={Math.round(size * 0.56)} color={colors.avatarText} />
       ) : (
         <Text
           style={[styles.initials, { fontSize, color: colors.avatarText }]}

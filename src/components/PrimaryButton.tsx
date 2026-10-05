@@ -13,7 +13,7 @@ import {
 import { useTheme, useThemedStyles } from '../theme/ThemeContext';
 import { androidRipple, interaction, maxFontScale, radius, spacing, type Theme } from '../theme/theme';
 
-export type PrimaryButtonVariant = 'primary' | 'google' | 'apple' | 'ghost';
+export type PrimaryButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
 
 export type PrimaryButtonProps = {
   label: string;
@@ -59,21 +59,21 @@ const createStyles = ({ colors }: Theme) =>
     primaryLabel: {
       color: colors.primaryText,
     },
-    googleContainer: {
-      backgroundColor: colors.google,
+    secondaryContainer: {
+      backgroundColor: colors.surfaceSunken,
       borderWidth: 1,
       borderColor: colors.border,
     },
-    // Provider buttons follow the provider's own branding per scheme, so their
-    // label colors are dedicated tokens instead of the theme text color.
-    googleLabel: {
-      color: colors.googleLabel,
+    secondaryLabel: {
+      color: colors.text,
     },
-    appleContainer: {
-      backgroundColor: colors.apple,
+    dangerContainer: {
+      backgroundColor: colors.dangerSurface,
+      borderWidth: 1,
+      borderColor: colors.dangerBorder,
     },
-    appleLabel: {
-      color: colors.appleLabel,
+    dangerLabel: {
+      color: colors.dangerText,
     },
     ghostContainer: {
       backgroundColor: 'transparent',
@@ -108,15 +108,15 @@ export const PrimaryButton: React.FC<PrimaryButtonProps> = ({
         label: styles.primaryLabel,
         spinner: colors.primaryText,
       },
-      google: {
-        container: styles.googleContainer,
-        label: styles.googleLabel,
-        spinner: colors.googleLabel,
+      secondary: {
+        container: styles.secondaryContainer,
+        label: styles.secondaryLabel,
+        spinner: colors.text,
       },
-      apple: {
-        container: styles.appleContainer,
-        label: styles.appleLabel,
-        spinner: colors.appleLabel,
+      danger: {
+        container: styles.dangerContainer,
+        label: styles.dangerLabel,
+        spinner: colors.dangerText,
       },
       ghost: {
         container: styles.ghostContainer,

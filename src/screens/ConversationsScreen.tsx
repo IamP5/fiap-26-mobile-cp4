@@ -1,140 +1,97 @@
 import React, { useCallback, useMemo, useState } from 'react';
-import {
-  FlatList,
-  type ListRenderItemInfo,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  type StyleProp,
-  type ViewStyle,
-} from 'react-native';
+import { FlatList, type ListRenderItemInfo, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ConversationItem } from '../components/ConversationItem';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { Icon } from '../components/Icon';
 import { SearchBar } from '../components/SearchBar';
 import { tabBarClearance } from '../components/TabBar';
-import { UserItem } from '../components/UserItem';
 import { UserItemSkeleton } from '../components/UserItemSkeleton';
+import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
 import { useTheme, useThemedStyles } from '../theme/ThemeContext';
 import { androidRipple, layout, spacing, type Theme } from '../theme/theme';
-import type { ConversationPreview } from '../types/chat';
-import type { ChatUser } from '../types/user';
-import { foldForSearch } from '../utils/chatRules';
+import type { ConversationSummary } from '../types/chat';
+import { matchesSearch } from '../utils/search';
 
 export type ConversationsScreenProps = {
-  me: ChatUser;
-  contacts: readonly ChatUser[];
+  meUid: string;
+  conversations: ConversationSummary[];
   loading: boolean;
   error: string | null;
   reload: () => void;
-  previews: Record<string, ConversationPreview>;
-  onSelect: (user: ChatUser) => void;
-  onNewChat: () => void;
+  onOpen: (conversation: ConversationSummary) => void;
+  onNewDirect: () => void;
+  onNewGroup: () => void;
 };
 
 const SKELETON_ROWS: readonly number[] = [0, 1, 2, 3, 4];
+const SEPARATOR_INSET: number = layout.avatar.lg - 4 + spacing.md * 2;
 
-// The separator is inset by the avatar width + its gutter so it visually
-// starts under the name, not under the avatar — the same rhythm most
-// messaging apps use for a conversation list.
-const SEPARATOR_INSET: number = layout.avatar.md + spacing.md + spacing.md;
+type Filter = 'all' | 'direct' | 'group';
+const FILTERS: ReadonlyArray<{ value: Filter; label: string }> = [
+  { value: 'all', label: 'Todas' },
+  { value: 'direct', label: 'Individuais' },
+  { value: 'group', label: 'Grupos' },
+];
 
-const Separator: React.FC = () => {
-  const styles = useThemedStyles(createStyles);
-  return <View style={[styles.separator, { marginLeft: SEPARATOR_INSET }]} />;
-};
-
-/**
- * WhatsApp home: ONLY contacts that already have messages appear here.
- * Starting a chat with someone new goes through the "+" button.
- */
 export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
-  me,
-  contacts,
+  meUid,
+  conversations,
   loading,
   error,
   reload,
-  previews,
-  onSelect,
-  onNewChat,
+  onOpen,
+  onNewDirect,
+  onNewGroup,
 }) => {
   const { colors } = useTheme();
   const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
+  const { byUid } = useDirectory();
   const [query, setQuery] = useState<string>('');
+  const [filter, setFilter] = useState<Filter>('all');
 
-  const conversations: readonly ChatUser[] = useMemo(
+  const visible = useMemo<ConversationSummary[]>(
     () =>
-      contacts
-        .filter((contact: ChatUser): boolean => previews[contact.uid]?.lastMessage != null)
-        .sort(
-          (a: ChatUser, b: ChatUser): number =>
-            (previews[b.uid]?.lastMessage?.createdAt ?? 0) -
-            (previews[a.uid]?.lastMessage?.createdAt ?? 0),
-        ),
-    [contacts, previews],
+      conversations.filter(
+        (row: ConversationSummary) => (filter === 'all' || row.type === filter) && matchesSearch(row.title, query),
+      ),
+    [conversations, filter, query],
   );
-
-  const filteredConversations: readonly ChatUser[] = useMemo(() => {
-    const needle: string = foldForSearch(query.trim());
-    if (needle.length === 0) {
-      return conversations;
-    }
-    return conversations.filter((contact: ChatUser): boolean => {
-      const nameMatch: boolean = foldForSearch(contact.name).includes(needle);
-      const emailMatch: boolean =
-        contact.email !== null && foldForSearch(contact.email).includes(needle);
-      return nameMatch || emailMatch;
-    });
-  }, [conversations, query]);
-
-  const containerStyle: StyleProp<ViewStyle> = useMemo(
-    () => [styles.container, { paddingTop: insets.top }],
-    [styles, insets.top],
-  );
-
-  const listContentStyle: StyleProp<ViewStyle> = useMemo(
-    () => ({ paddingBottom: tabBarClearance(insets.bottom) }),
-    [insets.bottom],
-  );
-
-  const keyExtractor = useCallback((user: ChatUser): string => user.uid, []);
-
-  const skeletonKeyExtractor = useCallback((item: number): string => `skeleton-${item}`, []);
 
   const renderItem = useCallback(
-    ({ item }: ListRenderItemInfo<ChatUser>) => (
-      <UserItem
-        user={item}
-        meUid={me.uid}
-        preview={previews[item.uid] ?? null}
-        onPress={onSelect}
+    ({ item }: ListRenderItemInfo<ConversationSummary>) => (
+      <ConversationItem
+        conversation={item}
+        meUid={meUid}
+        lastSenderName={
+          item.lastMessage === null ? null : profileOrFallback(byUid, item.lastMessage.senderId).name.split(' ')[0] ?? null
+        }
+        onPress={onOpen}
       />
     ),
-    [me.uid, previews, onSelect],
+    [meUid, byUid, onOpen],
   );
 
-  const renderSkeletonItem = useCallback(() => <UserItemSkeleton />, []);
+  const separator = useCallback(() => <View style={[styles.separator, { marginLeft: SEPARATOR_INSET }]} />, [styles]);
+  const contentStyle = useMemo(() => ({ paddingBottom: tabBarClearance(insets.bottom) }), [insets.bottom]);
 
   const renderBody = (): React.ReactElement => {
     if (loading) {
       return (
         <FlatList
           data={SKELETON_ROWS}
-          keyExtractor={skeletonKeyExtractor}
-          renderItem={renderSkeletonItem}
-          ItemSeparatorComponent={Separator}
-          contentContainerStyle={listContentStyle}
-          showsVerticalScrollIndicator={false}
+          keyExtractor={(item: number) => `skeleton-${item}`}
+          renderItem={() => <UserItemSkeleton />}
+          contentContainerStyle={contentStyle}
         />
       );
     }
     if (error !== null) {
       return (
-        <View style={styles.centeredBody}>
+        <View style={styles.padded}>
           <ErrorMessage message={error} onRetry={reload} />
         </View>
       );
@@ -142,60 +99,72 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
     if (conversations.length === 0) {
       return (
         <EmptyState
-          variant="generic"
+          variant="messages"
           title="Nenhuma conversa ainda"
-          description={'Toque em + no canto superior para começar uma conversa com um contato.'}
+          description="Toque em + para conversar com alguém ou no ícone de pessoas para criar um grupo."
         />
       );
     }
-    if (filteredConversations.length === 0) {
-      return (
-        <EmptyState
-          variant="generic"
-          title="Nenhum resultado"
-          description={`Nenhuma conversa corresponde a "${query.trim()}".`}
-        />
-      );
+    if (visible.length === 0) {
+      return <EmptyState title="Nenhum resultado" description="Nenhuma conversa corresponde à busca." />;
     }
     return (
       <FlatList
-        data={filteredConversations}
-        keyExtractor={keyExtractor}
+        data={visible}
+        keyExtractor={(item: ConversationSummary) => item.id}
         renderItem={renderItem}
-        ItemSeparatorComponent={Separator}
-        contentContainerStyle={listContentStyle}
-        showsVerticalScrollIndicator={false}
-        initialNumToRender={12}
-        maxToRenderPerBatch={10}
-        windowSize={11}
+        ItemSeparatorComponent={separator}
+        contentContainerStyle={contentStyle}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       />
     );
   };
 
   return (
-    <View style={containerStyle}>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.titleBar}>
-        <Text style={styles.screenTitle}>Conversas</Text>
-        <Pressable
-          onPress={onNewChat}
-          accessibilityRole="button"
-          accessibilityLabel="Nova conversa"
-          android_ripple={androidRipple(colors.ripple, true)}
-          hitSlop={4}
-          style={({ pressed }: { pressed: boolean }) => [
-            styles.newChatButton,
-            pressed ? styles.newChatButtonPressed : null,
-          ]}
-        >
-          <Icon name="plus" color={colors.onPrimary} size={18} />
-        </Pressable>
+        <Text style={styles.title}>Conversas</Text>
+        <View style={styles.actions}>
+          <Pressable
+            onPress={onNewGroup}
+            accessibilityRole="button"
+            accessibilityLabel="Criar grupo"
+            android_ripple={androidRipple(colors.ripple, true)}
+            style={({ pressed }: { pressed: boolean }) => [styles.secondaryAction, pressed ? styles.pressed : null]}
+          >
+            <Icon name="group" size={20} color={colors.primary} />
+          </Pressable>
+          <Pressable
+            onPress={onNewDirect}
+            accessibilityRole="button"
+            accessibilityLabel="Nova conversa individual"
+            android_ripple={androidRipple(colors.ripple, true)}
+            style={({ pressed }: { pressed: boolean }) => [styles.primaryAction, pressed ? styles.pressed : null]}
+          >
+            <Icon name="plus" size={18} color={colors.onPrimary} />
+          </Pressable>
+        </View>
       </View>
-
       <View style={styles.searchWrap}>
-        <SearchBar value={query} onChangeText={setQuery} placeholder="Pesquisar" />
+        <SearchBar value={query} onChangeText={setQuery} placeholder="Pesquisar conversas" />
       </View>
-
+      <View style={styles.filters} accessibilityRole="tablist">
+        {FILTERS.map((option) => {
+          const active: boolean = option.value === filter;
+          return (
+            <Pressable
+              key={option.value}
+              onPress={() => setFilter(option.value)}
+              accessibilityRole="tab"
+              accessibilityState={{ selected: active }}
+              style={[styles.filter, active ? styles.filterActive : null]}
+            >
+              <Text style={[styles.filterText, active ? styles.filterTextActive : null]}>{option.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
       <View style={styles.body}>{renderBody()}</View>
     </View>
   );
@@ -203,10 +172,7 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
 
 const createStyles = ({ colors, typography }: Theme) =>
   StyleSheet.create({
-    container: {
-      flex: 1,
-      backgroundColor: colors.background,
-    },
+    container: { flex: 1, backgroundColor: colors.background },
     titleBar: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -214,38 +180,40 @@ const createStyles = ({ colors, typography }: Theme) =>
       paddingHorizontal: spacing.md,
       paddingTop: spacing.sm,
     },
-    screenTitle: {
-      ...typography.largeTitle,
-    },
-    // WhatsApp's compose affordance: a filled accent circle, unmistakably
-    // "start something new" next to the plain-text title.
-    newChatButton: {
+    title: { ...typography.largeTitle },
+    actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+    primaryAction: {
       width: 36,
       height: 36,
-      alignItems: 'center',
-      justifyContent: 'center',
       borderRadius: 18,
       backgroundColor: colors.primary,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
-    newChatButtonPressed: {
-      opacity: 0.8,
+    secondaryAction: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: colors.primarySurface,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
-    searchWrap: {
-      marginHorizontal: spacing.md,
-      marginTop: spacing.sm,
-      marginBottom: spacing.sm,
-    },
-    body: {
-      flex: 1,
-    },
-    centeredBody: {
-      flex: 1,
+    pressed: { opacity: 0.8 },
+    searchWrap: { marginHorizontal: spacing.md, marginTop: spacing.sm },
+    filters: { flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
+    filter: {
       paddingHorizontal: spacing.md,
+      minHeight: 32,
+      justifyContent: 'center',
+      borderRadius: 16,
+      backgroundColor: colors.surfaceSunken,
     },
-    separator: {
-      height: layout.hairline,
-      backgroundColor: colors.separator,
-    },
+    filterActive: { backgroundColor: colors.primary },
+    filterText: { fontSize: 13, fontWeight: '600', color: colors.muted },
+    filterTextActive: { color: colors.onPrimary },
+    body: { flex: 1 },
+    padded: { paddingHorizontal: spacing.md },
+    separator: { height: layout.hairline, backgroundColor: colors.separator },
   });
 
 export default ConversationsScreen;

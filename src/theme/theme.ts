@@ -39,12 +39,8 @@ export const darkColors = {
   bubbleTheirs: '#182533',
   unreadBadge: '#4C9CE2',
   tickBlue: '#53BDEB',
-  google: '#FFFFFF',
-  // On dark, both provider buttons flip to white with a black label
-  // (Apple's dark-mode branding).
-  googleLabel: '#000000',
-  apple: '#FFFFFF',
-  appleLabel: '#000000',
+  mention: '#8CC8FF',
+  success: '#4FBF7F',
   // Avatar initials are always white: the palette below is vibrant in both
   // schemes and every entry carries white glyphs.
   avatarText: '#FFFFFF',
@@ -83,11 +79,8 @@ export const lightColors: ThemeColors = {
   bubbleTheirs: '#FFFFFF',
   unreadBadge: '#0B6BBE',
   tickBlue: '#1683D8',
-  google: '#FFFFFF',
-  googleLabel: '#1F2933',
-  // Apple light-mode branding: black button, white label.
-  apple: '#000000',
-  appleLabel: '#FFFFFF',
+  mention: '#0B5FA8',
+  success: '#1E8E4E',
   avatarText: '#FFFFFF',
   ripple: 'rgba(0,0,0,0.06)',
   avatarPalette: ['#E17076', '#FAA774', '#A695E7', '#7BC862', '#6EC9CB', '#65AADD', '#EE7AAE'],

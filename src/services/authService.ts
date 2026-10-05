@@ -1,371 +1,158 @@
-import { Platform } from 'react-native';
 import {
-  GoogleAuthProvider,
-  OAuthProvider,
   createUserWithEmailAndPassword,
-  signInWithCredential,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
-  signInWithPopup,
   signOut,
   updateProfile,
   type User,
   type UserCredential,
 } from 'firebase/auth';
-import * as AppleAuthentication from 'expo-apple-authentication';
 
-import { auth } from './firebase';
-import { deleteProfilePhotoByUrl, uploadProfilePhoto } from './photoService';
-import { getUser, saveUser } from './userService';
-import type { AuthProvider, ChatUser } from '../types/user';
+import type { ChatUser, PickedImage } from '../types/user';
+import { NETWORK_TIMEOUT_MS, withTimeout } from '../utils/async';
 import { createAppError } from '../utils/errors';
+import { auth } from './firebase';
+import { deletePhotoByUrl, uploadPhoto } from './photoService';
+import { getOwnUser, saveUser } from './userService';
 
-export type SignUpInput = { name: string; email: string; password: string };
+// E-mail and password is the only sign-in method of this app.
+
+export type SignUpInput = {
+  name: string;
+  email: string;
+  password: string;
+  /** E.164, e.g. +5511987654321. */
+  phoneNumber: string;
+  /** YYYY-MM-DD. */
+  birthDate: string;
+  photo: PickedImage | null;
+};
+
 export type SignInInput = { email: string; password: string };
 
-const MAX_NAME_LENGTH = 80;
+export type SignUpResult = {
+  user: ChatUser;
+  /** The account exists but the photo upload failed (it can be retried in
+   * the profile tab). */
+  photoFailed: boolean;
+};
 
-/**
- * The Realtime Database SDK queues reads/writes forever while the client is
- * offline (no built-in deadline), which would leave the auth bootstrap hanging
- * on "Carregando..." with no way out. Every profile round-trip is therefore
- * raced against an explicit deadline.
- */
-const PROFILE_TIMEOUT_MS = 8000;
+const AUTH_TIMEOUT_MESSAGE = 'Tempo esgotado ao autenticar. Verifique sua conexão e tente novamente.';
+const PROFILE_TIMEOUT_MESSAGE = 'Tempo esgotado ao carregar seu perfil. Verifique sua conexão e tente novamente.';
 
-/**
- * The Firebase Auth network calls (credential exchange / e-mail sign-in) also
- * have no client-side deadline, and a request that never settles would leave
- * the login form disabled forever — so they get the same explicit-race
- * treatment as the profile round-trips, just with a more generous budget.
- */
-const AUTH_TIMEOUT_MS = 20000;
-
-const AUTH_TIMEOUT_MESSAGE =
-  'Tempo esgotado ao autenticar. Verifique sua conexão e tente novamente.';
-
-const withTimeout = <T,>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> =>
-  new Promise<T>((resolve, reject) => {
-    const timer = setTimeout((): void => {
-      reject(createAppError(message));
-    }, timeoutMs);
-    operation.then(
-      (value: T): void => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown): void => {
-        clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-
-const withAuthTimeout = <T,>(operation: Promise<T>): Promise<T> =>
-  withTimeout(operation, AUTH_TIMEOUT_MS, AUTH_TIMEOUT_MESSAGE);
+export const INCOMPLETE_PROFILE_MESSAGE =
+  'Seu cadastro não foi concluído. Toque em "Criar conta" e use o mesmo e-mail e senha para terminar.';
 
 const readProfile = (uid: string): Promise<ChatUser | null> =>
-  withTimeout(
-    getUser(uid),
-    PROFILE_TIMEOUT_MS,
-    'Tempo esgotado ao carregar seu perfil. Verifique sua conexão e tente novamente.',
-  );
+  withTimeout(getOwnUser(uid), NETWORK_TIMEOUT_MS, PROFILE_TIMEOUT_MESSAGE);
 
-const writeProfile = (user: ChatUser): Promise<void> =>
-  withTimeout(
-    saveUser(user),
-    PROFILE_TIMEOUT_MS,
-    'Tempo esgotado ao salvar seu perfil. Verifique sua conexão e tente novamente.',
-  );
+const errorCode = (error: unknown): string | null =>
+  typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+    ? error.code
+    : null;
 
-type StoredProfileOutcome =
-  | { status: 'found'; user: ChatUser }
-  | { status: 'missing' }
-  | { status: 'unavailable' };
-
-/** Tolerant read used on app start: never rejects, but says WHY there is no profile. */
-const readProfileTolerant = async (uid: string): Promise<StoredProfileOutcome> => {
+/**
+ * Creates the Auth account, uploads the photo and writes users/{uid} plus
+ * publicProfiles/{uid}. If a previous attempt created the account but died
+ * before the profile was written, signing up again with the same e-mail and
+ * password completes it instead of failing with "e-mail already in use".
+ */
+export const signUpWithEmail = async (input: SignUpInput): Promise<SignUpResult> => {
+  const email: string = input.email.trim().toLowerCase();
+  let firebaseUser: User;
   try {
-    const stored: ChatUser | null = await readProfile(uid);
-    return stored === null ? { status: 'missing' } : { status: 'found', user: stored };
-  } catch {
-    return { status: 'unavailable' };
+    const credential: UserCredential = await withTimeout(
+      createUserWithEmailAndPassword(auth, email, input.password),
+      NETWORK_TIMEOUT_MS,
+      AUTH_TIMEOUT_MESSAGE,
+    );
+    firebaseUser = credential.user;
+  } catch (error: unknown) {
+    if (errorCode(error) !== 'auth/email-already-in-use') {
+      throw error;
+    }
+    let existing: UserCredential;
+    try {
+      existing = await signInWithEmailAndPassword(auth, email, input.password);
+    } catch {
+      throw error;
+    }
+    const profile: ChatUser | null = await readProfile(existing.user.uid);
+    if (profile !== null) {
+      return { user: profile, photoFailed: false };
+    }
+    firebaseUser = existing.user;
   }
-};
 
-const resolveProvider = (firebaseUser: User): AuthProvider => {
-  const providerIds: string[] = firebaseUser.providerData.map(
-    (info): string => info.providerId,
-  );
-
-  if (providerIds.includes('google.com')) {
-    return 'google';
+  let photoUrl = '';
+  let photoFailed = false;
+  if (input.photo !== null) {
+    try {
+      photoUrl = await uploadPhoto('profile-photos', firebaseUser.uid, input.photo);
+    } catch {
+      photoFailed = true;
+    }
   }
-  if (providerIds.includes('apple.com')) {
-    return 'apple';
-  }
-  return 'password';
-};
 
-const asHttpsUrl = (candidate: string | null): string | null =>
-  typeof candidate === 'string' && candidate.startsWith('https://') ? candidate : null;
-
-/** Photo reported by the identity provider itself (Google populates it; Apple
- * never does, and e-mail/senha accounts have none). */
-const providerPhotoUrl = (firebaseUser: User): string | null =>
-  asHttpsUrl(
-    firebaseUser.providerData
-      .map((info): string | null => info.photoURL)
-      .find((url): url is string => typeof url === 'string' && url.length > 0) ?? null,
-  );
-
-/**
- * Effective profile photo. The account-level photoURL wins because it is where
- * custom uploads land (updateUserPhoto), then the provider photo, then whatever
- * was already stored — so a photo survives sign-ins where the provider stops
- * reporting one. Only https urls are accepted.
- */
-const resolvePhotoUrl = (firebaseUser: User, storedPhotoUrl: string | null): string | null =>
-  asHttpsUrl(firebaseUser.photoURL) ?? providerPhotoUrl(firebaseUser) ?? asHttpsUrl(storedPhotoUrl);
-
-const nameFromEmail = (email: string | null): string | null => {
-  if (email === null) {
-    return null;
-  }
-  const localPart: string = email.split('@')[0] ?? '';
-  return localPart.length > 0 ? localPart : null;
-};
-
-const normalizeName = (candidate: string | null): string => {
-  const trimmed: string = (candidate ?? '').trim();
-  const fallback: string = trimmed.length > 0 ? trimmed : 'Usuário';
-  return fallback.slice(0, MAX_NAME_LENGTH);
-};
-
-const buildChatUser = (
-  firebaseUser: User,
-  preferredName: string | null,
-  createdAt: number,
-  storedPhotoUrl: string | null = null,
-): ChatUser => ({
-  uid: firebaseUser.uid,
-  name: normalizeName(
-    preferredName ?? firebaseUser.displayName ?? nameFromEmail(firebaseUser.email),
-  ),
-  email: firebaseUser.email,
-  photoUrl: resolvePhotoUrl(firebaseUser, storedPhotoUrl),
-  provider: resolveProvider(firebaseUser),
-  createdAt,
-});
-
-/**
- * Upserts users/$uid for every successful sign-in, preserving the original
- * createdAt when a profile already exists but always refreshing name/provider.
- */
-const upsertProfile = async (
-  firebaseUser: User,
-  preferredName: string | null,
-): Promise<ChatUser> => {
-  const stored: ChatUser | null = await readProfile(firebaseUser.uid);
-  const createdAt: number = stored === null ? Date.now() : stored.createdAt;
-  // Apple only returns the full name on the FIRST authorization and never
-  // populates displayName, so an explicit name wins, then the stored name, and
-  // only then the derived/placeholder fallbacks — otherwise a re-sign-in would
-  // overwrite a real name with "Usuário".
-  const resolvedName: string | null =
-    preferredName ?? firebaseUser.displayName ?? (stored === null ? null : stored.name);
-  const chatUser: ChatUser = buildChatUser(
-    firebaseUser,
-    resolvedName,
-    createdAt,
-    stored === null ? null : stored.photoUrl,
-  );
-  await writeProfile(chatUser);
-  return chatUser;
-};
-
-export const signUpWithEmail = async (input: SignUpInput): Promise<ChatUser> => {
-  const email: string = input.email.trim();
-  const name: string = normalizeName(input.name);
-  const credential: UserCredential = await withAuthTimeout(
-    createUserWithEmailAndPassword(auth, email, input.password),
-  );
-  await updateProfile(credential.user, { displayName: name });
-  return upsertProfile(credential.user, name);
+  const user: ChatUser = {
+    uid: firebaseUser.uid,
+    name: input.name.trim(),
+    email: firebaseUser.email ?? email,
+    phoneNumber: input.phoneNumber,
+    birthDate: input.birthDate,
+    photoUrl,
+    createdAt: Date.now(),
+  };
+  await withTimeout(saveUser(user), NETWORK_TIMEOUT_MS, PROFILE_TIMEOUT_MESSAGE);
+  // Cosmetic copy on the Auth record; the Firestore profile is the source.
+  void updateProfile(firebaseUser, { displayName: user.name }).catch(() => undefined);
+  return { user, photoFailed };
 };
 
 export const signInWithEmail = async (input: SignInInput): Promise<ChatUser> => {
-  const credential: UserCredential = await withAuthTimeout(
-    signInWithEmailAndPassword(auth, input.email.trim(), input.password),
+  const credential: UserCredential = await withTimeout(
+    signInWithEmailAndPassword(auth, input.email.trim().toLowerCase(), input.password),
+    NETWORK_TIMEOUT_MS,
+    AUTH_TIMEOUT_MESSAGE,
   );
-  return upsertProfile(credential.user, null);
+  const profile: ChatUser | null = await readProfile(credential.user.uid);
+  if (profile === null) {
+    await signOut(auth);
+    throw createAppError(INCOMPLETE_PROFILE_MESSAGE);
+  }
+  return profile;
 };
 
-export const signInWithGoogleIdToken = async (
-  idToken: string,
-  accessToken?: string,
-): Promise<ChatUser> => {
-  const googleCredential = GoogleAuthProvider.credential(idToken, accessToken);
-  const credential: UserCredential = await withAuthTimeout(
-    signInWithCredential(auth, googleCredential),
+export const requestPasswordReset = async (email: string): Promise<void> => {
+  await withTimeout(
+    sendPasswordResetEmail(auth, email.trim().toLowerCase()),
+    NETWORK_TIMEOUT_MS,
+    AUTH_TIMEOUT_MESSAGE,
   );
-  return upsertProfile(credential.user, null);
 };
 
-/**
- * Web-only Google flow. On the browser the redirect of an expo-auth-session
- * request would have to be registered on the OAuth client for every dev host,
- * while Firebase's own popup handler is already authorized for this project,
- * so the popup is used instead of an id-token exchange.
- */
-export const signInWithGooglePopup = async (): Promise<ChatUser> => {
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: 'select_account' });
-  const credential: UserCredential = await signInWithPopup(auth, provider);
-  return upsertProfile(credential.user, null);
-};
-
-export const signInWithAppleCredential = async (
-  identityToken: string,
-  rawNonce: string,
-  fullName: string | null,
-): Promise<ChatUser> => {
-  const provider = new OAuthProvider('apple.com');
-  const appleCredential = provider.credential({ idToken: identityToken, rawNonce });
-  const credential: UserCredential = await withAuthTimeout(
-    signInWithCredential(auth, appleCredential),
-  );
-  return upsertProfile(credential.user, fullName);
-};
+/** Profile of a restored session; null when the account has no profile. */
+export const resolveSessionUser = (firebaseUser: User): Promise<ChatUser | null> =>
+  readProfile(firebaseUser.uid);
 
 export const signOutUser = async (): Promise<void> => {
   await signOut(auth);
 };
 
-/** Renames the account everywhere: Firebase Auth displayName + users/$uid. */
 export const updateUserName = async (current: ChatUser, name: string): Promise<ChatUser> => {
   const trimmed: string = name.trim();
-  if (trimmed.length === 0) {
-    throw createAppError('Informe um nome válido.');
+  if (trimmed.length === 0 || trimmed.length > 80) {
+    throw createAppError('Informe um nome entre 1 e 80 caracteres.');
   }
-  const normalized: string = normalizeName(trimmed);
-  const firebaseUser: User | null = auth.currentUser;
-  if (firebaseUser === null) {
-    throw createAppError('Sessão expirada. Entre novamente para alterar o nome.');
-  }
-  await updateProfile(firebaseUser, { displayName: normalized });
-  const updated: ChatUser = { ...current, name: normalized };
-  await writeProfile(updated);
+  const updated: ChatUser = { ...current, name: trimmed };
+  await withTimeout(saveUser(updated), NETWORK_TIMEOUT_MS, PROFILE_TIMEOUT_MESSAGE);
   return updated;
 };
 
-/**
- * Re-reads the provider photo (Google account picture) from the Firebase Auth
- * session and stores it on users/$uid so every contact sees it. Reads the
- * providerData photo specifically — the account-level photoURL may hold a
- * custom upload, and "import from Google" must bring back the GOOGLE one.
- * Apple and e-mail/senha accounts have no provider photo, so this rejects
- * with an explanatory message for them.
- */
-export const syncProviderPhoto = async (current: ChatUser): Promise<ChatUser> => {
-  const firebaseUser: User | null = auth.currentUser;
-  if (firebaseUser === null) {
-    throw createAppError('Sessão expirada. Entre novamente para atualizar a foto.');
-  }
-  // Best-effort refresh so a photo changed on the Google account since login
-  // is picked up; a failed reload still lets the cached one be used.
-  try {
-    await firebaseUser.reload();
-  } catch {
-    // keep the cached session data
-  }
-  const refreshed: User = auth.currentUser ?? firebaseUser;
-  const photoUrl: string | null = providerPhotoUrl(refreshed);
-  if (photoUrl === null) {
-    throw createAppError(
-      current.provider === 'google'
-        ? 'Sua conta Google não possui uma foto de perfil pública para importar.'
-        : 'Este tipo de conta não fornece foto de perfil: a Apple não compartilha fotos, e contas de e-mail/senha não têm provedor de foto.',
-    );
-  }
-  await updateProfile(refreshed, { photoURL: photoUrl });
+export const updateUserPhoto = async (current: ChatUser, image: PickedImage): Promise<ChatUser> => {
+  const photoUrl: string = await uploadPhoto('profile-photos', current.uid, image);
   const updated: ChatUser = { ...current, photoUrl };
-  await writeProfile(updated);
-  // The previous photo may have been a custom upload; remove the orphan.
-  void deleteProfilePhotoByUrl(current.uid, current.photoUrl);
+  await withTimeout(saveUser(updated), NETWORK_TIMEOUT_MS, PROFILE_TIMEOUT_MESSAGE);
+  void deletePhotoByUrl('profile-photos', current.uid, current.photoUrl);
   return updated;
-};
-
-/**
- * Custom profile photo picked from the gallery or taken with the camera:
- * uploads the local file to Firebase Storage, points the Firebase Auth
- * photoURL at it (so it survives future sign-ins — upsertProfile prefers the
- * account photoURL) and stores it on users/$uid so every contact sees it.
- */
-export const updateUserPhoto = async (
-  current: ChatUser,
-  localUri: string,
-  mimeType: string | null,
-): Promise<ChatUser> => {
-  const firebaseUser: User | null = auth.currentUser;
-  if (firebaseUser === null) {
-    throw createAppError('Sessão expirada. Entre novamente para atualizar a foto.');
-  }
-  const photoUrl: string = await uploadProfilePhoto(firebaseUser.uid, localUri, mimeType);
-  await updateProfile(firebaseUser, { photoURL: photoUrl });
-  const updated: ChatUser = { ...current, photoUrl };
-  await writeProfile(updated);
-  // Housekeeping only: a failure here never blocks the new photo.
-  void deleteProfilePhotoByUrl(current.uid, current.photoUrl);
-  return updated;
-};
-
-export const isAppleAuthAvailable = async (): Promise<boolean> => {
-  if (Platform.OS !== 'ios') {
-    return false;
-  }
-  try {
-    return await AppleAuthentication.isAvailableAsync();
-  } catch {
-    return false;
-  }
-};
-
-/**
- * Resolves the app-level user for an already authenticated FirebaseUser:
- * prefers the stored RTDB profile, falling back to data derived from
- * providerData when the profile is missing.
- */
-export const resolveChatUser = async (firebaseUser: User): Promise<ChatUser> => {
-  const outcome: StoredProfileOutcome = await readProfileTolerant(firebaseUser.uid);
-  if (outcome.status === 'found') {
-    // Backfill the provider photo for profiles written before photos existed
-    // (or whose photo write failed): the photo must appear without any user
-    // action. Best-effort — the session proceeds with the stored profile
-    // either way.
-    const sessionPhotoUrl: string | null = resolvePhotoUrl(firebaseUser, null);
-    if (outcome.user.photoUrl === null && sessionPhotoUrl !== null) {
-      const withPhoto: ChatUser = { ...outcome.user, photoUrl: sessionPhotoUrl };
-      try {
-        await writeProfile(withPhoto);
-        return withPhoto;
-      } catch {
-        return outcome.user;
-      }
-    }
-    return outcome.user;
-  }
-
-  const derived: ChatUser = buildChatUser(firebaseUser, null, Date.now());
-
-  if (outcome.status === 'missing') {
-    // A session without users/$uid is invisible to every contact and has every
-    // conversation/message write rejected by the rules, so the profile is
-    // created here instead of admitting a session that cannot chat. A failure
-    // is propagated so AuthContext can surface it and keep the login screen.
-    await writeProfile(derived);
-  }
-
-  // 'unavailable' means the read itself failed (offline / denied): the derived
-  // profile is used for this session and the stored one is left untouched.
-  return derived;
 };

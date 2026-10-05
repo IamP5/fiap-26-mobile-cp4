@@ -1,22 +1,29 @@
 rules_version = '2';
 
+// Firebase Storage holds the image files; Firestore only stores their
+// download URLs. Each user writes only under their own folder.
 service firebase.storage {
   match /b/{bucket}/o {
-    // Profile photos live under profile-photos/$uid/<timestamp>.<ext>.
-    // Every signed-in user may READ them (avatars are rendered for all
-    // contacts in the chat list), but only the owner may upload or delete,
-    // and uploads must be images of at most 5 MB (mirrored client-side in
-    // photoService.ts).
+    function isImageUpload() {
+      return request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/.*');
+    }
+
+    // profile-photos/{uid}/<timestamp>.<ext>
     match /profile-photos/{uid}/{fileName} {
       allow read: if request.auth != null;
-      allow create, update: if request.auth != null
-        && request.auth.uid == uid
-        && request.resource.size <= 5 * 1024 * 1024
-        && request.resource.contentType.matches('image/.*');
+      allow create, update: if request.auth != null && request.auth.uid == uid && isImageUpload();
       allow delete: if request.auth != null && request.auth.uid == uid;
     }
 
-    // Everything else in the bucket is closed.
+    // group-photos/{ownerUid}/<timestamp>.<ext> — uploaded by the group owner;
+    // the API only accepts group photo URLs from the caller's own folder.
+    match /group-photos/{uid}/{fileName} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null && request.auth.uid == uid && isImageUpload();
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
     match /{allPaths=**} {
       allow read, write: if false;
     }
