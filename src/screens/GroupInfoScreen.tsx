@@ -1,19 +1,23 @@
 import React, { useCallback, useMemo } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Bell, ChevronRight, Pencil, UsersRound } from 'lucide-react-native';
+import { ScrollView, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '../components/Avatar';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { GroupMemberItem } from '../components/GroupMemberItem';
 import { Loading } from '../components/Loading';
-import { PrimaryButton } from '../components/PrimaryButton';
+import { ListRow, ListSection, ListSeparator, listPageClassName } from '../components/native/List';
 import { ScreenHeader } from '../components/ScreenHeader';
+import { Icon } from '../components/ui/icon';
 import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
 import { useAuth } from '../hooks/useAuth';
 import { useGroup } from '../hooks/useGroups';
+import { fadeOut, heroEnter, layout } from '../lib/motion';
+import { isMaterial } from '../lib/platform';
+import { cn } from '../lib/utils';
 import { policyLabel } from '../services/groupService';
-import { useThemedStyles } from '../theme/ThemeContext';
-import { radius, spacing, type Theme } from '../theme/theme';
 import type { ScreenProps } from '../types/navigation';
 import type { PublicProfile } from '../types/user';
 import { slotsLabel } from '../utils/groupValidation';
@@ -21,7 +25,6 @@ import { slotsLabel } from '../utils/groupValidation';
 /** Opened from the group photo in the chat: every member, each leading to
  * their profile. The owner also gets the edit entry point. */
 export const GroupInfoScreen: React.FC<ScreenProps<'GroupInfo'>> = ({ navigation, route }) => {
-  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { byUid } = useDirectory();
@@ -51,56 +54,68 @@ export const GroupInfoScreen: React.FC<ScreenProps<'GroupInfo'>> = ({ navigation
     }
     if (error !== null || unavailable || group === null) {
       return (
-        <View style={styles.padded}>
+        <View className="p-4">
           <ErrorMessage message={error ?? 'Este grupo não está mais disponível para você.'} />
         </View>
       );
     }
+    const memberCount: number = group.memberIds.length;
     return (
-      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}>
-        <View style={styles.hero}>
-          <Avatar name={group.name} uid={group.id} photoUrl={group.photoUrl} variant="group" size={112} />
-          <Text style={styles.name}>{group.name}</Text>
-          <Text style={styles.meta}>{slotsLabel(group.memberLimit, group.memberIds.length)}</Text>
-          <Text style={styles.meta}>Notificações: {policyLabel(group.notificationPolicy)}</Text>
-        </View>
-        {group.ownerId === meUid ? (
-          <PrimaryButton label="Editar grupo" onPress={() => navigation.navigate('GroupForm', { groupId: group.id })} />
-        ) : null}
-        <Text style={styles.sectionTitle}>Integrantes</Text>
-        <View style={styles.card}>
-          {members.map((member: PublicProfile) => (
-            <GroupMemberItem
-              key={member.uid}
-              member={member}
-              isOwner={member.uid === group.ownerId}
-              isMe={member.uid === meUid}
-              onPress={openProfile}
-            />
+      <ScrollView
+        contentContainerClassName="gap-6 pt-6"
+        contentContainerStyle={{ paddingBottom: insets.bottom + 32 }}
+        showsVerticalScrollIndicator={false}
+      >
+        <Animated.View entering={heroEnter} className="items-center px-5">
+          <Avatar name={group.name} uid={group.id} photoUrl={group.photoUrl} variant="group" size={104} />
+          <Text className="text-foreground mt-3 text-center text-[24px] font-semibold">{group.name}</Text>
+          <Text className="text-muted-foreground mt-0.5 text-[15px]">
+            Grupo · {memberCount} {memberCount === 1 ? 'integrante' : 'integrantes'}
+          </Text>
+        </Animated.View>
+
+        <ListSection title="Detalhes">
+          <ListRow icon={UsersRound} iconColor="blue" label={slotsLabel(group.memberLimit, memberCount)} />
+          <ListSeparator />
+          <ListRow icon={Bell} iconColor="red" label="Notificações" value={policyLabel(group.notificationPolicy)} />
+          {group.ownerId === meUid ? (
+            <>
+              <ListSeparator />
+              <ListRow
+                icon={Pencil}
+                iconColor="orange"
+                label="Editar grupo"
+                onPress={() => navigation.navigate('GroupForm', { groupId: group.id })}
+                accessibilityLabel="Editar grupo"
+                trailing={isMaterial ? undefined : <Icon as={ChevronRight} className="text-muted-foreground size-5" />}
+              />
+            </>
+          ) : null}
+        </ListSection>
+
+        <ListSection title={`${memberCount} de ${group.memberLimit} integrantes`}>
+          {members.map((member: PublicProfile, index: number) => (
+            <Animated.View key={member.uid} exiting={fadeOut} layout={layout}>
+              {index > 0 ? <ListSeparator inset={74} /> : null}
+              <GroupMemberItem
+                member={member}
+                isOwner={member.uid === group.ownerId}
+                isMe={member.uid === meUid}
+                onPress={openProfile}
+              />
+            </Animated.View>
           ))}
-        </View>
+        </ListSection>
       </ScrollView>
     );
   };
 
   return (
-    <View style={styles.container}>
+    <View className={cn('flex-1', listPageClassName)}>
       <ScreenHeader title="Dados do grupo" onBack={navigation.goBack} />
       {body()}
     </View>
   );
 };
-
-const createStyles = ({ colors, elevation }: Theme) =>
-  StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    content: { padding: spacing.md, gap: spacing.md },
-    padded: { padding: spacing.md },
-    hero: { alignItems: 'center', gap: spacing.xs, paddingVertical: spacing.md },
-    name: { marginTop: spacing.sm, fontSize: 22, fontWeight: '800', color: colors.text, textAlign: 'center' },
-    meta: { fontSize: 14, color: colors.muted },
-    sectionTitle: { fontSize: 13, fontWeight: '700', color: colors.muted, textTransform: 'uppercase', letterSpacing: 0.5 },
-    card: { backgroundColor: colors.surface, borderRadius: radius.lg, overflow: 'hidden', ...elevation.card },
-  });
 
 export default GroupInfoScreen;

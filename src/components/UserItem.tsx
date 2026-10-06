@@ -1,11 +1,15 @@
+import { Check } from 'lucide-react-native';
 import React, { useCallback } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { androidRipple, layout, spacing, type Theme } from '../theme/theme';
-import type { PublicProfile } from '../types/user';
+import { Icon } from '@/components/ui/icon';
+import { popIn, popOut } from '@/lib/motion';
+import { cn } from '@/lib/utils';
+import { useThemeColors } from '@/theme/ThemeContext';
+import { androidRipple } from '@/theme/theme';
+import type { PublicProfile } from '@/types/user';
 import { Avatar } from './Avatar';
-import { Icon } from './Icon';
 
 export type UserItemProps = {
   user: PublicProfile;
@@ -17,11 +21,12 @@ export type UserItemProps = {
   caption?: string;
 };
 
+/** Full-width contact row (same geometry as ConversationItem); iOS-style round check. */
 export const UserItem: React.FC<UserItemProps> = ({ user, onPress, selected, disabled = false, caption }) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
+  const colors = useThemeColors();
   const handlePress = useCallback((): void => onPress(user), [onPress, user]);
   const selectable: boolean = selected !== undefined;
+  const checked: boolean = selected === true;
 
   return (
     <Pressable
@@ -31,55 +36,34 @@ export const UserItem: React.FC<UserItemProps> = ({ user, onPress, selected, dis
       accessibilityState={selectable ? { checked: selected, disabled } : { disabled }}
       accessibilityLabel={selectable ? user.name : `Conversar com ${user.name}`}
       android_ripple={androidRipple(colors.ripple)}
-      style={({ pressed }: { pressed: boolean }) => [
-        styles.row,
-        pressed ? styles.pressed : null,
-        disabled ? styles.disabled : null,
-      ]}
+      className={cn(
+        'ios:active:bg-accent web:active:bg-accent min-h-16 flex-row items-center gap-3 px-4 py-2',
+        disabled && 'opacity-40',
+      )}
     >
-      <Avatar name={user.name} uid={user.uid} photoUrl={user.photoUrl} size={layout.avatar.md} />
-      <View style={styles.info}>
-        <Text style={styles.name} numberOfLines={1}>
+      <Avatar name={user.name} uid={user.uid} photoUrl={user.photoUrl} size={46} />
+      <View className="flex-1">
+        <Text className="text-foreground text-base font-medium" numberOfLines={1}>
           {user.name}
         </Text>
-        {caption !== undefined ? <Text style={styles.caption}>{caption}</Text> : null}
+        {caption !== undefined ? <Text className="text-muted-foreground text-[13px]">{caption}</Text> : null}
       </View>
       {selectable ? (
-        <View style={[styles.check, selected === true ? styles.checkOn : null]}>
-          {selected === true ? <Icon name="check" size={14} color={colors.onPrimary} /> : null}
+        <View
+          className={cn(
+            'size-[22px] items-center justify-center rounded-full border-2',
+            checked ? 'bg-primary border-primary' : 'border-input',
+          )}
+        >
+          {checked ? (
+            <Animated.View entering={popIn} exiting={popOut}>
+              <Icon as={Check} strokeWidth={3} className="text-primary-foreground size-3" />
+            </Animated.View>
+          ) : null}
         </View>
-      ) : (
-        <Icon name="chevron-right" size={14} color={colors.muted} />
-      )}
+      ) : null}
     </Pressable>
   );
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    row: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingVertical: spacing.sm + spacing.xxs,
-      paddingHorizontal: spacing.md,
-      minHeight: 64,
-      backgroundColor: colors.background,
-    },
-    pressed: { backgroundColor: colors.surface },
-    disabled: { opacity: 0.5 },
-    info: { flex: 1, marginLeft: spacing.md },
-    name: { fontSize: 16, fontWeight: '600', color: colors.text },
-    caption: { marginTop: 2, fontSize: 13, color: colors.muted },
-    check: {
-      width: 24,
-      height: 24,
-      borderRadius: 12,
-      borderWidth: 2,
-      borderColor: colors.border,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    checkOn: { backgroundColor: colors.primary, borderColor: colors.primary },
-  });
 
 export default UserItem;

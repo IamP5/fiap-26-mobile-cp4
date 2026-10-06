@@ -1,5 +1,6 @@
-import React, { useCallback, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Pressable, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
 import { AuthLayout } from '../components/AuthLayout';
 import { ErrorMessage } from '../components/ErrorMessage';
@@ -7,11 +8,11 @@ import { PhotoPicker } from '../components/PhotoPicker';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { TextField } from '../components/TextField';
 import { useAuth } from '../hooks/useAuth';
-import { useThemedStyles } from '../theme/ThemeContext';
-import { spacing, type Theme } from '../theme/theme';
 import type { ScreenProps } from '../types/navigation';
 import type { PickedImage } from '../types/user';
 import { isValidEmail, maskDate, maskPhone, normalizePhone, parseBirthDate } from '../utils/format';
+import { haptics } from '@/lib/haptics';
+import { fadeOut, layout, riseIn } from '@/lib/motion';
 
 type FieldErrors = Partial<Record<'name' | 'email' | 'phone' | 'birthDate' | 'password' | 'confirm', string>>;
 
@@ -19,7 +20,6 @@ const MIN_PASSWORD = 6;
 
 export const RegisterScreen: React.FC<ScreenProps<'Register'>> = ({ navigation }) => {
   const { loading, error, signUp, clearError } = useAuth();
-  const styles = useThemedStyles(createStyles);
   const [photo, setPhoto] = useState<PickedImage | null>(null);
   const [name, setName] = useState<string>('');
   const [email, setEmail] = useState<string>('');
@@ -61,6 +61,7 @@ export const RegisterScreen: React.FC<ScreenProps<'Register'>> = ({ navigation }
     }
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0 || phoneNumber === null || !parsedDate.ok) {
+      haptics.error();
       setFormError('Corrija os campos destacados.');
       return;
     }
@@ -74,16 +75,23 @@ export const RegisterScreen: React.FC<ScreenProps<'Register'>> = ({ navigation }
 
   const displayedError: string | null = error ?? formError;
 
+  // Auth failures from the server get the same tactile cue as local ones.
+  useEffect(() => {
+    if (error !== null) {
+      haptics.error();
+    }
+  }, [error]);
+
   return (
     <AuthLayout
       compactHeader
       title="Criar conta"
       subtitle="Preencha seus dados para começar a conversar."
       footer={
-        <View style={styles.footer}>
-          <Text style={styles.footerText}>Já tem conta?</Text>
-          <Pressable onPress={goBack} disabled={loading} accessibilityRole="button" hitSlop={8}>
-            <Text style={styles.link}>Entrar</Text>
+        <View className="mt-6 flex-row items-center justify-center gap-1.5">
+          <Text className="text-muted-foreground text-[15px]">Já tem conta?</Text>
+          <Pressable onPress={goBack} disabled={loading} accessibilityRole="button" hitSlop={8} className="active:opacity-70">
+            <Text className="text-primary text-[15px] font-semibold">Entrar</Text>
           </Pressable>
         </View>
       }
@@ -103,17 +111,16 @@ export const RegisterScreen: React.FC<ScreenProps<'Register'>> = ({ navigation }
       <TextField label="Data de nascimento" value={birthDate} onChangeText={handleDateChange} placeholder="DD/MM/AAAA" keyboardType="number-pad" editable={!loading} error={fieldErrors.birthDate} />
       <TextField label="Senha" value={password} onChangeText={setPassword} placeholder={`Mínimo de ${MIN_PASSWORD} caracteres`} secureTextEntry editable={!loading} error={fieldErrors.password} />
       <TextField label="Confirmar senha" value={confirm} onChangeText={setConfirm} placeholder="Repita a senha" secureTextEntry editable={!loading} error={fieldErrors.confirm} returnKeyType="go" onSubmitEditing={handleSubmit} />
-      {displayedError !== null ? <ErrorMessage message={displayedError} onDismiss={() => { clearError(); setFormError(null); }} /> : null}
-      <PrimaryButton label="Criar conta" onPress={handleSubmit} loading={loading} disabled={loading} />
+      {displayedError !== null ? (
+        <Animated.View key={displayedError} entering={riseIn} exiting={fadeOut} layout={layout}>
+          <ErrorMessage message={displayedError} onDismiss={() => { clearError(); setFormError(null); }} />
+        </Animated.View>
+      ) : null}
+      <Animated.View layout={layout}>
+        <PrimaryButton label="Criar conta" onPress={handleSubmit} loading={loading} disabled={loading} />
+      </Animated.View>
     </AuthLayout>
   );
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    footer: { flexDirection: 'row', justifyContent: 'center', gap: spacing.xs, marginTop: spacing.lg },
-    footerText: { fontSize: 15, color: colors.muted },
-    link: { fontSize: 15, fontWeight: '700', color: colors.primary },
-  });
 
 export default RegisterScreen;

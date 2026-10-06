@@ -1,17 +1,26 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { FlatList, type ListRenderItemInfo, Pressable, StyleSheet, Text, View } from 'react-native';
+import { MessageSquarePlus, SquarePen, UsersRound } from 'lucide-react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ListRenderItemInfo, Pressable, ScrollView, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ConversationItem } from '../components/ConversationItem';
+import { ConversationItem, ROW_TEXT_INSET } from '../components/ConversationItem';
+import { ListSeparator } from '../components/native/List';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorMessage } from '../components/ErrorMessage';
-import { Icon } from '../components/Icon';
+import { IconButton } from '../components/IconButton';
+import { PrimaryButton } from '../components/PrimaryButton';
 import { SearchBar } from '../components/SearchBar';
-import { tabBarClearance } from '../components/TabBar';
+import { tabBarClearance, tabBarFabOffset } from '../components/TabBar';
+import { Icon } from '../components/ui/icon';
 import { UserItemSkeleton } from '../components/UserItemSkeleton';
 import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { androidRipple, layout, spacing, type Theme } from '../theme/theme';
+import { haptics } from '../lib/haptics';
+import { fadeIn, layout, listItemEnter } from '../lib/motion';
+import { isMaterial } from '../lib/platform';
+import { cn } from '../lib/utils';
+import { useThemeColors } from '../theme/ThemeContext';
+import { androidRipple } from '../theme/theme';
 import type { ConversationSummary } from '../types/chat';
 import { matchesSearch } from '../utils/search';
 
@@ -26,15 +35,88 @@ export type ConversationsScreenProps = {
   onNewGroup: () => void;
 };
 
-const SKELETON_ROWS: readonly number[] = [0, 1, 2, 3, 4];
-const SEPARATOR_INSET: number = layout.avatar.lg - 4 + spacing.md * 2;
+const RowSeparator: React.FC = () => <ListSeparator inset={ROW_TEXT_INSET} />;
 
-type Filter = 'all' | 'direct' | 'group';
+const SKELETON_ROWS: readonly number[] = [0, 1, 2, 3, 4, 5];
+
+type Filter = 'all' | 'unread' | 'direct' | 'group';
 const FILTERS: ReadonlyArray<{ value: Filter; label: string }> = [
   { value: 'all', label: 'Todas' },
+  { value: 'unread', label: 'Não lidas' },
   { value: 'direct', label: 'Individuais' },
   { value: 'group', label: 'Grupos' },
 ];
+
+const matchesFilter = (row: ConversationSummary, filter: Filter): boolean => {
+  switch (filter) {
+    case 'all':
+      return true;
+    case 'unread':
+      return row.unreadCount > 0;
+    default:
+      return row.type === filter;
+  }
+};
+
+type FilterChipsProps = {
+  value: Filter;
+  onChange: (filter: Filter) => void;
+  unreadCount: number;
+};
+
+/**
+ * Filter chips (WhatsApp "Todas / Não lidas / Grupos", Telegram folders):
+ * filled capsules, the selected one tinted with the accent. The color simply
+ * switches — no sliding thumb.
+ */
+const FilterChips: React.FC<FilterChipsProps> = ({ value, onChange, unreadCount }) => {
+  const colors = useThemeColors();
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      // A horizontal ScrollView grows to fill a column on web; pin it to its content.
+      style={{ flexGrow: 0 }}
+      contentContainerClassName="items-start gap-2 px-4 py-3"
+      keyboardShouldPersistTaps="handled"
+      accessibilityRole="tablist"
+    >
+      {FILTERS.map((option) => {
+        const active: boolean = option.value === value;
+        return (
+          <Pressable
+            key={option.value}
+            onPress={() => {
+              if (!active) {
+                haptics.select();
+                onChange(option.value);
+              }
+            }}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            android_ripple={androidRipple(colors.ripple)}
+            className={cn(
+              'flex-row items-center gap-1.5 overflow-hidden rounded-full px-3.5',
+              isMaterial ? 'h-9' : 'h-8 ios:active:opacity-70 web:active:opacity-70',
+              active ? 'bg-primary/15' : 'bg-muted',
+            )}
+          >
+            <Text
+              className={cn('text-[14px]', active ? 'text-primary font-semibold' : 'text-muted-foreground font-medium')}
+            >
+              {option.label}
+            </Text>
+            {option.value === 'unread' && unreadCount > 0 ? (
+              <Text className={cn('text-[13px] tabular-nums', active ? 'text-primary' : 'text-muted-foreground')}>
+                {unreadCount}
+              </Text>
+            ) : null}
+          </Pressable>
+        );
+      })}
+    </ScrollView>
+  );
+};
 
 export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
   meUid,
@@ -46,8 +128,6 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
   onNewDirect,
   onNewGroup,
 }) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   const { byUid } = useDirectory();
   const [query, setQuery] = useState<string>('');
@@ -55,43 +135,57 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
 
   const visible = useMemo<ConversationSummary[]>(
     () =>
-      conversations.filter(
-        (row: ConversationSummary) => (filter === 'all' || row.type === filter) && matchesSearch(row.title, query),
-      ),
+      conversations.filter((row: ConversationSummary) => matchesFilter(row, filter) && matchesSearch(row.title, query)),
     [conversations, filter, query],
   );
 
+  const showingList: boolean = !loading && error === null && visible.length > 0;
+  // Rows cascade in only the first time the list appears; realtime updates,
+  // reorders and filter switches must not replay the entrance.
+  const staggerRows = useRef<boolean>(true);
+  useEffect(() => {
+    if (showingList) {
+      staggerRows.current = false;
+    }
+  }, [showingList]);
+
   const renderItem = useCallback(
-    ({ item }: ListRenderItemInfo<ConversationSummary>) => (
-      <ConversationItem
-        conversation={item}
-        meUid={meUid}
-        lastSenderName={
-          item.lastMessage === null ? null : profileOrFallback(byUid, item.lastMessage.senderId).name.split(' ')[0] ?? null
-        }
-        onPress={onOpen}
-      />
+    ({ item, index }: ListRenderItemInfo<ConversationSummary>) => (
+      <Animated.View entering={staggerRows.current ? listItemEnter(index) : undefined}>
+        <ConversationItem
+          conversation={item}
+          meUid={meUid}
+          lastSenderName={
+            item.lastMessage === null
+              ? null
+              : (profileOrFallback(byUid, item.lastMessage.senderId).name.split(' ')[0] ?? null)
+          }
+          onPress={onOpen}
+        />
+      </Animated.View>
     ),
     [meUid, byUid, onOpen],
   );
 
-  const separator = useCallback(() => <View style={[styles.separator, { marginLeft: SEPARATOR_INSET }]} />, [styles]);
+  const unreadCount: number = useMemo(
+    () => conversations.filter((row: ConversationSummary) => row.unreadCount > 0).length,
+    [conversations],
+  );
   const contentStyle = useMemo(() => ({ paddingBottom: tabBarClearance(insets.bottom) }), [insets.bottom]);
 
   const renderBody = (): React.ReactElement => {
     if (loading) {
       return (
-        <FlatList
-          data={SKELETON_ROWS}
-          keyExtractor={(item: number) => `skeleton-${item}`}
-          renderItem={() => <UserItemSkeleton />}
-          contentContainerStyle={contentStyle}
-        />
+        <View style={contentStyle}>
+          {SKELETON_ROWS.map((row: number) => (
+            <UserItemSkeleton key={`skeleton-${row}`} index={row} />
+          ))}
+        </View>
       );
     }
     if (error !== null) {
       return (
-        <View style={styles.padded}>
+        <View className="px-4">
           <ErrorMessage message={error} onRetry={reload} />
         </View>
       );
@@ -101,119 +195,84 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
         <EmptyState
           variant="messages"
           title="Nenhuma conversa ainda"
-          description="Toque em + para conversar com alguém ou no ícone de pessoas para criar um grupo."
+          description="Comece uma conversa com alguém ou crie um grupo para falar com várias pessoas."
+          action={<PrimaryButton label="Nova conversa" onPress={onNewDirect} className="px-6" />}
         />
       );
     }
     if (visible.length === 0) {
-      return <EmptyState title="Nenhum resultado" description="Nenhuma conversa corresponde à busca." />;
+      return filter === 'unread' && query.length === 0 ? (
+        <EmptyState variant="messages" title="Tudo em dia" description="Você não tem mensagens não lidas." />
+      ) : (
+        <EmptyState title="Nenhum resultado" description="Nenhuma conversa corresponde à busca." />
+      );
     }
     return (
-      <FlatList
-        data={visible}
-        keyExtractor={(item: ConversationSummary) => item.id}
-        renderItem={renderItem}
-        ItemSeparatorComponent={separator}
-        contentContainerStyle={contentStyle}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      />
+      // Keyed by filter: switching filters crossfades the list instead of
+      // popping rows in place (search keeps the same list and just reflows).
+      <Animated.View key={filter} entering={staggerRows.current ? undefined : fadeIn} className="flex-1">
+        <Animated.FlatList
+          data={visible}
+          keyExtractor={(item: ConversationSummary) => item.id}
+          renderItem={renderItem}
+          itemLayoutAnimation={layout}
+          ItemSeparatorComponent={RowSeparator}
+          contentContainerStyle={contentStyle}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          showsVerticalScrollIndicator={false}
+        />
+      </Animated.View>
     );
   };
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      <View style={styles.titleBar}>
-        <Text style={styles.title}>Conversas</Text>
-        <View style={styles.actions}>
-          <Pressable
-            onPress={onNewGroup}
-            accessibilityRole="button"
-            accessibilityLabel="Criar grupo"
-            android_ripple={androidRipple(colors.ripple, true)}
-            style={({ pressed }: { pressed: boolean }) => [styles.secondaryAction, pressed ? styles.pressed : null]}
-          >
-            <Icon name="group" size={20} color={colors.primary} />
-          </Pressable>
-          <Pressable
-            onPress={onNewDirect}
-            accessibilityRole="button"
-            accessibilityLabel="Nova conversa individual"
-            android_ripple={androidRipple(colors.ripple, true)}
-            style={({ pressed }: { pressed: boolean }) => [styles.primaryAction, pressed ? styles.pressed : null]}
-          >
-            <Icon name="plus" size={18} color={colors.onPrimary} />
-          </Pressable>
+    <View className="bg-background flex-1" style={{ paddingTop: insets.top }}>
+      {isMaterial ? (
+        // Material 3 top app bar (WhatsApp): title left, actions right.
+        <View className="h-16 flex-row items-center justify-between pl-4 pr-1">
+          <Text className="text-foreground text-[22px] font-semibold" accessibilityRole="header">
+            Conversas
+          </Text>
+          <IconButton icon={UsersRound} onPress={onNewGroup} accessibilityLabel="Criar grupo" />
         </View>
+      ) : (
+        // iOS 26: large title with Liquid Glass actions on the same line.
+        <View className="flex-row items-center justify-between pb-1 pl-5 pr-4 pt-2">
+          <Text className="text-foreground text-[34px] font-bold tracking-tight" accessibilityRole="header">
+            Conversas
+          </Text>
+          <View className="flex-row items-center gap-2">
+            <IconButton icon={UsersRound} variant="glass" onPress={onNewGroup} accessibilityLabel="Criar grupo" />
+            <IconButton
+              icon={SquarePen}
+              variant="glass"
+              onPress={onNewDirect}
+              accessibilityLabel="Nova conversa individual"
+            />
+          </View>
+        </View>
+      )}
+      <View className="mx-4 mt-1">
+        <SearchBar value={query} onChangeText={setQuery} placeholder="Pesquisar" />
       </View>
-      <View style={styles.searchWrap}>
-        <SearchBar value={query} onChangeText={setQuery} placeholder="Pesquisar conversas" />
-      </View>
-      <View style={styles.filters} accessibilityRole="tablist">
-        {FILTERS.map((option) => {
-          const active: boolean = option.value === filter;
-          return (
-            <Pressable
-              key={option.value}
-              onPress={() => setFilter(option.value)}
-              accessibilityRole="tab"
-              accessibilityState={{ selected: active }}
-              style={[styles.filter, active ? styles.filterActive : null]}
-            >
-              <Text style={[styles.filterText, active ? styles.filterTextActive : null]}>{option.label}</Text>
-            </Pressable>
-          );
-        })}
-      </View>
-      <View style={styles.body}>{renderBody()}</View>
+      <FilterChips value={filter} onChange={setFilter} unreadCount={unreadCount} />
+      <View className="flex-1">{renderBody()}</View>
+      {isMaterial ? (
+        // WhatsApp's "new chat" FAB, above the navigation bar.
+        <Pressable
+          onPress={onNewDirect}
+          accessibilityRole="button"
+          accessibilityLabel="Nova conversa individual"
+          android_ripple={androidRipple('rgba(255,255,255,0.24)')}
+          className="bg-primary absolute right-4 size-14 items-center justify-center overflow-hidden rounded-2xl"
+          style={{ bottom: tabBarFabOffset(insets.bottom), elevation: 6 }}
+        >
+          <Icon as={MessageSquarePlus} className="text-primary-foreground size-6" />
+        </Pressable>
+      ) : null}
     </View>
   );
 };
-
-const createStyles = ({ colors, typography }: Theme) =>
-  StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    titleBar: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingHorizontal: spacing.md,
-      paddingTop: spacing.sm,
-    },
-    title: { ...typography.largeTitle },
-    actions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-    primaryAction: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: colors.primary,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    secondaryAction: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: colors.primarySurface,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    pressed: { opacity: 0.8 },
-    searchWrap: { marginHorizontal: spacing.md, marginTop: spacing.sm },
-    filters: { flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
-    filter: {
-      paddingHorizontal: spacing.md,
-      minHeight: 32,
-      justifyContent: 'center',
-      borderRadius: 16,
-      backgroundColor: colors.surfaceSunken,
-    },
-    filterActive: { backgroundColor: colors.primary },
-    filterText: { fontSize: 13, fontWeight: '600', color: colors.muted },
-    filterTextActive: { color: colors.onPrimary },
-    body: { flex: 1 },
-    padded: { paddingHorizontal: spacing.md },
-    separator: { height: layout.hairline, backgroundColor: colors.separator },
-  });
 
 export default ConversationsScreen;

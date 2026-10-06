@@ -1,0 +1,96 @@
+@import 'tailwindcss';
+@import 'uniwind';
+
+/*
+ * Design tokens — shadcn/ui token names (React Native Reusables), values from
+ * the SpecSync theme: neutral zinc surfaces + a single saturated action blue.
+ * Chat-specific tokens (bubbles, wallpaper, ticks) extend the base set.
+ * Every theme must define the same variables. Keep in sync with
+ * src/theme/theme.ts (the JS mirror used for non-className props).
+ */
+@layer theme {
+  :root {
+    @variant light {
+      --color-background: #ffffff;
+      --color-foreground: #0a0a0a;
+      --color-card: #ffffff;
+      --color-card-foreground: #0a0a0a;
+      --color-popover: #ffffff;
+      --color-popover-foreground: #0a0a0a;
+      --color-primary: #066fef;
+      --color-primary-foreground: #ffffff;
+      --color-secondary: #f4f4f5;
+      --color-secondary-foreground: #18181b;
+      --color-muted: #f4f4f5;
+      --color-muted-foreground: #71717a;
+      --color-accent: #f4f4f5;
+      --color-accent-foreground: #0a0a0a;
+      --color-destructive: #dc2626;
+      --color-destructive-foreground: #ffffff;
+      --color-success: #16a34a;
+      --color-warning: #d97706;
+      --color-border: #e4e4e7;
+      --color-input: #e4e4e7;
+      --color-ring: #066fef;
+
+      --color-chat: #f4f4f5;
+      --color-chat-pattern: #d4d4d8;
+      --color-bubble-mine: #066fef;
+      --color-bubble-mine-foreground: #ffffff;
+      --color-bubble-mine-muted: #cfe3ff;
+      --color-bubble-theirs: #ffffff;
+      --color-bubble-theirs-foreground: #0a0a0a;
+      --color-tick-read: #ffffff;
+      --color-mention: #066fef;
+
+      /* iOS inset-grouped lists: gray page, white cards. */
+      --color-grouped: #f2f2f7;
+      --color-grouped-card: #ffffff;
+    }
+
+    @variant dark {
+      --color-background: #0f0f0f;
+      --color-foreground: #f0f0f0;
+      --color-card: #171717;
+      --color-card-foreground: #f0f0f0;
+      --color-popover: #1e1e1e;
+      --color-popover-foreground: #f0f0f0;
+      --color-primary: #066fef;
+      --color-primary-foreground: #ffffff;
+      --color-secondary: #1e1e1e;
+      --color-secondary-foreground: #e5e5e5;
+      --color-muted: #1e1e1e;
+      --color-muted-foreground: #a1a1aa;
+      --color-accent: #262626;
+      --color-accent-foreground: #f0f0f0;
+      --color-destructive: #f14e46;
+      --color-destructive-foreground: #ffffff;
+      --color-success: #4ade80;
+      --color-warning: #fbbf24;
+      --color-border: #262626;
+      --color-input: #2e2e2e;
+      --color-ring: #066fef;
+
+      --color-chat: #0a0a0a;
+      --color-chat-pattern: #1f1f1f;
+      --color-bubble-mine: #066fef;
+      --color-bubble-mine-foreground: #ffffff;
+      --color-bubble-mine-muted: #bcd8ff;
+      --color-bubble-theirs: #1e1e1e;
+      --color-bubble-theirs-foreground: #f0f0f0;
+      --color-tick-read: #ffffff;
+      --color-mention: #5ea4ff;
+
+      --color-grouped: #0a0a0a;
+      --color-grouped-card: #1c1c1e;
+    }
+  }
+}
+
+@theme {
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-2xl: 20px;
+}

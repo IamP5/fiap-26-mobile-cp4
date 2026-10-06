@@ -1,15 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Plus, Trash2, X } from 'lucide-react-native';
+import { Alert, Platform, Pressable, ScrollView, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { Avatar } from '../components/Avatar';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { GroupMemberItem } from '../components/GroupMemberItem';
-import { Icon } from '../components/Icon';
 import { Loading } from '../components/Loading';
+import { PressableScale } from '../components/motion/PressableScale';
 import { PhotoPicker } from '../components/PhotoPicker';
 import { PrimaryButton } from '../components/PrimaryButton';
+import { ListIcon, groupedCardClassName, listPageClassName, sectionTitleClassName } from '../components/native/List';
 import { ScreenHeader } from '../components/ScreenHeader';
 import { TextField } from '../components/TextField';
+import { Icon } from '../components/ui/icon';
 import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
 import { useAuth } from '../hooks/useAuth';
 import { useGroup } from '../hooks/useGroups';
@@ -22,8 +27,11 @@ import {
   updateGroup,
   uploadGroupPhoto,
 } from '../services/groupService';
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { radius, spacing, type Theme } from '../theme/theme';
+import { haptics } from '../lib/haptics';
+import { dropIn, fadeOut, layout, listItemEnter, popIn, popOut, sectionEnter } from '../lib/motion';
+import { cn } from '../lib/utils';
+import { useThemeColors } from '../theme/ThemeContext';
+import { androidRipple } from '../theme/theme';
 import type { ChatGroup, UpdateGroupInput } from '../types/group';
 import { MAX_MEMBER_LIMIT } from '../types/group';
 import type { ScreenProps } from '../types/navigation';
@@ -67,8 +75,7 @@ export const GroupFormScreen: React.FC<ScreenProps<'GroupForm'>> = (props) => {
 };
 
 const GroupForm: React.FC<ScreenProps<'GroupForm'> & { me: ChatUser }> = ({ navigation, route, me }) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
+  const colors = useThemeColors();
   const insets = useSafeAreaInsets();
   const { byUid } = useDirectory();
   const groupId: string | null = route.params?.groupId ?? null;
@@ -241,30 +248,39 @@ const GroupForm: React.FC<ScreenProps<'GroupForm'> & { me: ChatUser }> = ({ navi
     if (group === null) {
       return;
     }
-    void confirm('Excluir grupo', 'O grupo e todas as mensagens serão apagados para todos os integrantes.', 'Excluir').then(
-      (ok: boolean) => {
-        if (!ok) {
-          return;
-        }
-        setSaving(true);
-        deleteGroup(group.id)
-          .then(() => navigation.popToTop())
-          .catch((caught: unknown) => {
-            handleError(caught);
-            setSaving(false);
-          });
-      },
-    );
+    void confirm(
+      'Excluir grupo',
+      'O grupo e todas as mensagens serão apagados para todos os integrantes.',
+      'Excluir',
+    ).then((ok: boolean) => {
+      if (!ok) {
+        return;
+      }
+      setSaving(true);
+      deleteGroup(group.id)
+        .then(() => navigation.popToTop())
+        .catch((caught: unknown) => {
+          handleError(caught);
+          setSaving(false);
+        });
+    });
   }, [group, navigation, handleError]);
 
   const memberProfiles = useMemo<PublicProfile[]>(
-    () => currentMembers.map((uid: string) => (uid === me.uid ? { uid, name: me.name, photoUrl: me.photoUrl } : profileOrFallback(byUid, uid))),
+    () =>
+      currentMembers.map((uid: string) =>
+        uid === me.uid ? { uid, name: me.name, photoUrl: me.photoUrl } : profileOrFallback(byUid, uid),
+      ),
     [currentMembers, byUid, me],
+  );
+  const selectedProfiles = useMemo<PublicProfile[]>(
+    () => memberProfiles.filter((member: PublicProfile) => member.uid !== me.uid),
+    [memberProfiles, me.uid],
   );
 
   if (editing && (groupLoading || (!hydrated && group !== null))) {
     return (
-      <View style={styles.container}>
+      <View className={cn('flex-1', listPageClassName)}>
         <ScreenHeader title="Editar grupo" onBack={navigation.goBack} />
         <Loading label="Carregando grupo..." />
       </View>
@@ -272,9 +288,9 @@ const GroupForm: React.FC<ScreenProps<'GroupForm'> & { me: ChatUser }> = ({ navi
   }
   if (editing && (unavailable || group === null || !isOwner)) {
     return (
-      <View style={styles.container}>
+      <View className={cn('flex-1', listPageClassName)}>
         <ScreenHeader title="Editar grupo" onBack={navigation.goBack} />
-        <View style={styles.padded}>
+        <View className="p-4">
           <ErrorMessage
             message={
               groupError ??
@@ -289,134 +305,237 @@ const GroupForm: React.FC<ScreenProps<'GroupForm'> & { me: ChatUser }> = ({ navi
   }
 
   const ownerUid: string = editing && group !== null ? group.ownerId : me.uid;
-  const slotsText: string = limit !== null && limitError === null ? slotsLabel(limit, memberCount) : `${memberCount} integrante(s)`;
+  const slotsText: string =
+    limit !== null && limitError === null ? slotsLabel(limit, memberCount) : `${memberCount} integrante(s)`;
   const full: boolean = limit !== null && availableSlots(limit, memberCount) === 0;
 
   return (
-    <View style={styles.container}>
+    <View className={cn('flex-1', listPageClassName)}>
       <ScreenHeader title={editing ? 'Editar grupo' : 'Novo grupo'} onBack={navigation.goBack} />
       <ScrollView
-        contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}
+        contentContainerClassName="gap-6 px-4 pb-6 pt-6"
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <PhotoPicker
-          name={name}
-          uid={groupId ?? 'novo-grupo'}
-          photoUri={photo?.uri ?? group?.photoUrl ?? ''}
-          variant="group"
-          onPicked={setPhoto}
-          onError={setError}
-          disabled={saving}
-          label={photo === null && (group?.photoUrl ?? '') === '' ? 'Adicionar foto do grupo' : 'Alterar foto do grupo'}
-        />
+        <Animated.View entering={sectionEnter(0)} className="items-center">
+          <PhotoPicker
+            name={name}
+            uid={groupId ?? 'novo-grupo'}
+            photoUri={photo?.uri ?? group?.photoUrl ?? ''}
+            variant="group"
+            onPicked={setPhoto}
+            onError={setError}
+            disabled={saving}
+            label={
+              photo === null && (group?.photoUrl ?? '') === '' ? 'Adicionar foto do grupo' : 'Alterar foto do grupo'
+            }
+          />
+        </Animated.View>
 
-        <TextField label="Nome do grupo" value={name} onChangeText={setName} placeholder="Ex.: Turma FIAP" autoCapitalize="sentences" editable={!saving} />
-
-        <TextField
-          label={`Limite de integrantes (2 a ${MAX_MEMBER_LIMIT}, contando você)`}
-          value={limitText}
-          onChangeText={setLimitText}
-          keyboardType="number-pad"
-          editable={!saving}
-          error={limitError ?? undefined}
-        />
-        <View style={[styles.slots, full ? styles.slotsFull : null]}>
-          <Text style={[styles.slotsText, full ? styles.slotsTextFull : null]}>{slotsText}</Text>
-        </View>
-
-        <Text style={styles.sectionTitle}>Notificações push</Text>
-        <View style={styles.card} accessibilityRole="radiogroup">
-          {POLICY_OPTIONS.map((option) => {
-            const active: boolean = policy === option.value;
-            return (
-              <Pressable
-                key={option.value}
-                onPress={() => setPolicy(option.value)}
-                disabled={saving}
-                accessibilityRole="radio"
-                accessibilityState={{ selected: active }}
-                accessibilityLabel={`${option.label}. ${option.description}`}
-                style={({ pressed }: { pressed: boolean }) => [styles.option, pressed ? styles.pressed : null]}
-              >
-                <View style={[styles.radio, active ? styles.radioOn : null]}>
-                  {active ? <View style={styles.radioDot} /> : null}
-                </View>
-                <View style={styles.optionText}>
-                  <Text style={styles.optionLabel}>{option.label}</Text>
-                  <Text style={styles.optionDescription}>{option.description}</Text>
-                </View>
-              </Pressable>
-            );
-          })}
-        </View>
-
-        <View style={styles.membersHeader}>
-          <Text style={styles.sectionTitle}>Integrantes ({memberCount})</Text>
-          <Pressable
-            onPress={openPicker}
-            disabled={saving || full}
-            accessibilityRole="button"
-            accessibilityLabel="Adicionar integrantes"
-            style={({ pressed }: { pressed: boolean }) => [styles.addButton, (saving || full) ? styles.disabled : null, pressed ? styles.pressed : null]}
-          >
-            <Icon name="plus" size={12} color={colors.primary} />
-            <Text style={styles.addText}>{full ? 'Grupo cheio' : 'Adicionar'}</Text>
-          </Pressable>
-        </View>
-        <View style={styles.card}>
-          {memberProfiles.map((member: PublicProfile) => (
-            <GroupMemberItem
-              key={member.uid}
-              member={member}
-              isOwner={member.uid === ownerUid}
-              isMe={member.uid === me.uid}
-              onPress={(profile: PublicProfile) => {
-                if (editing) {
-                  navigation.navigate('Profile', { uid: profile.uid });
-                }
-              }}
-              onRemove={member.uid === ownerUid ? undefined : handleRemove}
-              removing={busyMember === member.uid}
+        <Animated.View entering={sectionEnter(1)} layout={layout} className="gap-4">
+          <TextField
+            label="Nome do grupo"
+            value={name}
+            onChangeText={setName}
+            placeholder="Ex.: Turma FIAP"
+            autoCapitalize="sentences"
+            editable={!saving}
+          />
+          <View className="gap-2">
+            <TextField
+              label={`Limite de integrantes (2 a ${MAX_MEMBER_LIMIT}, contando você)`}
+              value={limitText}
+              onChangeText={setLimitText}
+              keyboardType="number-pad"
+              editable={!saving}
+              error={limitError ?? undefined}
             />
-          ))}
-          {memberCount < 2 ? <Text style={styles.hint}>Adicione pelo menos uma pessoa para criar o grupo.</Text> : null}
-        </View>
+            <Animated.View
+              layout={layout}
+              className={cn(
+                'self-start rounded-full border px-2.5 py-1',
+                full ? 'border-destructive/20 bg-destructive/10' : 'border-primary/20 bg-primary/10',
+              )}
+            >
+              <Text className={cn('text-[13px] font-medium tabular-nums', full ? 'text-destructive' : 'text-primary')}>
+                {slotsText}
+              </Text>
+            </Animated.View>
+          </View>
+        </Animated.View>
 
-        {error !== null ? <ErrorMessage message={error} onDismiss={() => setError(null)} /> : null}
-        {success !== null ? <Text style={styles.success}>{success}</Text> : null}
+        <Animated.View entering={sectionEnter(2)} layout={layout} className="gap-2">
+          <Text className={sectionTitleClassName}>Notificações push</Text>
+          <View className={groupedCardClassName} accessibilityRole="radiogroup">
+            {POLICY_OPTIONS.map((option, index: number) => {
+              const active: boolean = policy === option.value;
+              return (
+                <React.Fragment key={option.value}>
+                  {index > 0 ? <View className="bg-border ml-12 h-px" /> : null}
+                  <Pressable
+                    onPress={() => {
+                      if (!active) {
+                        haptics.select();
+                        setPolicy(option.value);
+                      }
+                    }}
+                    disabled={saving}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={`${option.label}. ${option.description}`}
+                    android_ripple={androidRipple(colors.ripple)}
+                    className="ios:active:bg-accent web:active:bg-accent flex-row items-start gap-3 px-4 py-3.5"
+                  >
+                    <View
+                      className={cn(
+                        'mt-0.5 size-5 items-center justify-center rounded-full border-2',
+                        active ? 'border-primary' : 'border-input',
+                      )}
+                    >
+                      {active ? (
+                        <Animated.View entering={popIn} exiting={popOut} className="bg-primary size-2.5 rounded-full" />
+                      ) : null}
+                    </View>
+                    <View className="flex-1 gap-0.5">
+                      <Text className="text-foreground text-[15px] font-medium">{option.label}</Text>
+                      <Text className="text-muted-foreground text-[13px] leading-[18px]">{option.description}</Text>
+                    </View>
+                  </Pressable>
+                </React.Fragment>
+              );
+            })}
+          </View>
+        </Animated.View>
 
-        <PrimaryButton label={editing ? 'Salvar alterações' : 'Criar grupo'} onPress={handleSubmit} loading={saving} disabled={saving} />
-        {editing ? <PrimaryButton label="Excluir grupo" variant="danger" onPress={handleDelete} disabled={saving} /> : null}
+        <Animated.View entering={sectionEnter(3)} layout={layout} className="gap-2">
+          <View className="flex-row items-center justify-between pr-1">
+            <Text className={sectionTitleClassName}>Integrantes ({memberCount})</Text>
+            <PressableScale
+              activeScale={0.94}
+              onPress={() => {
+                haptics.tap();
+                openPicker();
+              }}
+              disabled={saving || full}
+              accessibilityRole="button"
+              accessibilityLabel="Adicionar integrantes"
+              hitSlop={6}
+              className={cn(
+                'border-primary/20 bg-primary/10 h-8 flex-row items-center gap-1 rounded-full border px-3 active:bg-primary/15',
+                (saving || full) && 'opacity-50',
+              )}
+            >
+              <Icon as={Plus} strokeWidth={2.5} className="text-primary size-3.5" />
+              <Text className="text-primary text-[13px] font-semibold">{full ? 'Grupo cheio' : 'Adicionar'}</Text>
+            </PressableScale>
+          </View>
+          {!editing && selectedProfiles.length > 0 ? (
+            <Animated.View entering={dropIn} exiting={fadeOut} layout={layout}>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                keyboardShouldPersistTaps="handled"
+                contentContainerClassName="gap-2 px-1 py-1"
+              >
+                {selectedProfiles.map((member: PublicProfile) => (
+                  <Animated.View key={member.uid} entering={popIn} exiting={popOut} layout={layout}>
+                    <PressableScale
+                      activeScale={0.94}
+                      onPress={() => {
+                        haptics.select();
+                        handleRemove(member);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Remover ${member.name} do grupo`}
+                      className="bg-card border-border active:bg-accent h-8 flex-row items-center gap-1.5 rounded-full border pl-1 pr-2"
+                    >
+                      <Avatar name={member.name} uid={member.uid} photoUrl={member.photoUrl} size={24} />
+                      <Text className="text-foreground max-w-[120px] text-[13px] font-medium" numberOfLines={1}>
+                        {member.name.split(' ')[0]}
+                      </Text>
+                      <Icon as={X} className="text-muted-foreground size-3.5" />
+                    </PressableScale>
+                  </Animated.View>
+                ))}
+              </ScrollView>
+            </Animated.View>
+          ) : null}
+          <Animated.View layout={layout} className={groupedCardClassName}>
+            {memberProfiles.map((member: PublicProfile, index: number) => (
+              <Animated.View key={member.uid} entering={listItemEnter(index)} exiting={fadeOut} layout={layout}>
+                {index > 0 ? <View className="bg-border ml-[72px] h-px" /> : null}
+                <GroupMemberItem
+                  member={member}
+                  isOwner={member.uid === ownerUid}
+                  isMe={member.uid === me.uid}
+                  onPress={(profile: PublicProfile) => {
+                    if (editing) {
+                      navigation.navigate('Profile', { uid: profile.uid });
+                    }
+                  }}
+                  onRemove={member.uid === ownerUid ? undefined : handleRemove}
+                  removing={busyMember === member.uid}
+                />
+              </Animated.View>
+            ))}
+            {memberCount < 2 ? (
+              <Animated.View entering={dropIn} exiting={fadeOut} layout={layout}>
+                <View className="bg-border h-px" />
+                <Text className="text-muted-foreground px-4 py-3.5 text-[13px]">
+                  Adicione pelo menos uma pessoa para criar o grupo.
+                </Text>
+              </Animated.View>
+            ) : null}
+          </Animated.View>
+        </Animated.View>
+
+        {editing ? (
+          <Animated.View entering={sectionEnter(4)} layout={layout} className={groupedCardClassName}>
+            <PressableScale
+              activeScale={0.985}
+              onPress={() => {
+                haptics.tap();
+                handleDelete();
+              }}
+              disabled={saving}
+              accessibilityRole="button"
+              accessibilityLabel="Excluir grupo"
+              accessibilityState={{ disabled: saving }}
+              android_ripple={androidRipple(colors.ripple)}
+              className={cn(
+                'ios:active:bg-accent web:active:bg-accent min-h-[52px] flex-row items-center gap-3 px-4 py-3',
+                saving && 'opacity-50',
+              )}
+            >
+              <ListIcon icon={Trash2} destructive />
+              <Text className="text-destructive flex-1 text-[17px]">Excluir grupo</Text>
+            </PressableScale>
+          </Animated.View>
+        ) : null}
       </ScrollView>
+
+      <Animated.View layout={layout} className="gap-3 px-4 pt-3" style={{ paddingBottom: insets.bottom + 12 }}>
+        {error !== null ? (
+          <Animated.View entering={dropIn} exiting={fadeOut} layout={layout}>
+            <ErrorMessage message={error} onDismiss={() => setError(null)} />
+          </Animated.View>
+        ) : null}
+        {success !== null ? (
+          <Animated.View entering={dropIn} exiting={fadeOut} layout={layout}>
+            <Text className="text-success text-center text-sm" accessibilityLiveRegion="polite">
+              {success}
+            </Text>
+          </Animated.View>
+        ) : null}
+        <PrimaryButton
+          label={editing ? 'Salvar alterações' : 'Criar grupo'}
+          onPress={handleSubmit}
+          loading={saving}
+          disabled={saving}
+        />
+      </Animated.View>
     </View>
   );
 };
-
-const createStyles = ({ colors, elevation }: Theme) =>
-  StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    content: { padding: spacing.md, gap: spacing.md },
-    padded: { padding: spacing.md },
-    sectionTitle: { fontSize: 13, fontWeight: '700', color: colors.muted, textTransform: 'uppercase', letterSpacing: 0.5 },
-    card: { backgroundColor: colors.surface, borderRadius: radius.lg, overflow: 'hidden', ...elevation.card },
-    slots: { marginTop: -spacing.sm, alignSelf: 'flex-start', paddingHorizontal: spacing.sm + spacing.xxs, paddingVertical: spacing.xs, borderRadius: radius.pill, backgroundColor: colors.primarySurface },
-    slotsFull: { backgroundColor: colors.dangerSurface },
-    slotsText: { fontSize: 13, fontWeight: '600', color: colors.primary },
-    slotsTextFull: { color: colors.dangerText },
-    option: { flexDirection: 'row', alignItems: 'flex-start', gap: spacing.md, padding: spacing.md },
-    pressed: { opacity: 0.75 },
-    disabled: { opacity: 0.5 },
-    radio: { marginTop: 2, width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' },
-    radioOn: { borderColor: colors.primary },
-    radioDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: colors.primary },
-    optionText: { flex: 1 },
-    optionLabel: { fontSize: 15, fontWeight: '600', color: colors.text },
-    optionDescription: { marginTop: 2, fontSize: 13, lineHeight: 18, color: colors.muted },
-    membersHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-    addButton: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.sm + spacing.xxs, minHeight: 32, borderRadius: radius.pill, backgroundColor: colors.primarySurface },
-    addText: { fontSize: 13, fontWeight: '700', color: colors.primary },
-    hint: { padding: spacing.md, fontSize: 13, color: colors.muted },
-    success: { fontSize: 14, color: colors.success, textAlign: 'center' },
-  });
 
 export default GroupFormScreen;

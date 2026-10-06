@@ -1,87 +1,36 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, StyleSheet, View } from 'react-native';
+import React from 'react';
+import { View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { useThemedStyles } from '../theme/ThemeContext';
-import { layout, spacing, type Theme } from '../theme/theme';
+import { Skeleton } from '@/components/ui/skeleton';
+import { listItemEnter } from '@/lib/motion';
 
-// Mirrors UserItem's row geometry exactly (68px min height, 44px avatar
-// circle, two text bars) so the transition from skeleton to real data never
-// pops the layout. Pulses opacity via the native driver so it can never
-// block VirtualizedList row rendering.
-export const UserItemSkeleton: React.FC = () => {
-  const styles = useThemedStyles(createStyles);
-  const opacity = useRef(new Animated.Value(0.5)).current;
-
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, {
-          toValue: 1,
-          duration: 900,
-          useNativeDriver: true,
-          isInteraction: false,
-        }),
-        Animated.timing(opacity, {
-          toValue: 0.5,
-          duration: 900,
-          useNativeDriver: true,
-          isInteraction: false,
-        }),
-      ]),
-    );
-    loop.start();
-    return (): void => {
-      loop.stop();
-    };
-  }, [opacity]);
-
-  return (
-    <View
-      style={styles.container}
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-    >
-      <Animated.View style={[styles.avatar, { opacity }]} />
-      <View style={styles.info}>
-        <Animated.View style={[styles.bar, styles.barWide, { opacity }]} />
-        <Animated.View style={[styles.bar, styles.barNarrow, { opacity }]} />
-      </View>
-    </View>
-  );
+export type UserItemSkeletonProps = {
+  /** Position in the placeholder list: staggers the entrance and varies line widths. */
+  index?: number;
 };
 
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    container: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      minHeight: 68,
-      paddingVertical: spacing.sm + spacing.xxs,
-      paddingHorizontal: spacing.md,
-      backgroundColor: colors.background,
-    },
-    avatar: {
-      width: layout.avatar.md,
-      height: layout.avatar.md,
-      borderRadius: layout.avatar.md / 2,
-      backgroundColor: colors.surfaceSunken,
-      marginRight: spacing.md,
-    },
-    info: {
-      flex: 1,
-      gap: spacing.sm,
-    },
-    bar: {
-      height: 12,
-      borderRadius: 6,
-      backgroundColor: colors.surfaceSunken,
-    },
-    barWide: {
-      width: '45%',
-    },
-    barNarrow: {
-      width: '70%',
-    },
-  });
+// Varying line lengths read as real content rather than a stamped pattern.
+const TITLE_WIDTHS: readonly string[] = ['w-2/5', 'w-1/3', 'w-1/2', 'w-1/4', 'w-2/5'];
+const LINE_WIDTHS: readonly string[] = ['w-3/4', 'w-2/3', 'w-4/5', 'w-1/2', 'w-3/5'];
+
+/** Placeholder row matching ConversationItem / UserItem geometry (full width). */
+export const UserItemSkeleton: React.FC<UserItemSkeletonProps> = ({ index = 0 }) => (
+  <Animated.View
+    entering={listItemEnter(index)}
+    className="flex-row items-center gap-3 px-4 py-3"
+    accessibilityElementsHidden
+    importantForAccessibility="no-hide-descendants"
+  >
+    <Skeleton className="size-[54px] rounded-full" />
+    <View className="flex-1 gap-2">
+      <View className="flex-row items-center justify-between gap-4">
+        <Skeleton className={`h-3.5 rounded-full ${TITLE_WIDTHS[index % TITLE_WIDTHS.length]}`} />
+        <Skeleton className="h-2.5 w-8 rounded-full" />
+      </View>
+      <Skeleton className={`h-3 rounded-full ${LINE_WIDTHS[index % LINE_WIDTHS.length]}`} />
+    </View>
+  </Animated.View>
+);
 
 export default UserItemSkeleton;

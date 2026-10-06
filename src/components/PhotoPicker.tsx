@@ -1,12 +1,17 @@
 import React, { useCallback, useState } from 'react';
-import { ActivityIndicator, Alert, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Camera } from 'lucide-react-native';
+import { ActivityIndicator, Alert, Platform, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { pickPhoto, type PhotoSource, type PickResult } from '../services/photoService';
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { spacing, type Theme } from '../theme/theme';
-import type { PickedImage } from '../types/user';
+import { PressableScale } from '@/components/motion/PressableScale';
+import { Icon } from '@/components/ui/icon';
+import { haptics } from '@/lib/haptics';
+import { fadeIn, popIn } from '@/lib/motion';
+import { cn } from '@/lib/utils';
+import { pickPhoto, type PhotoSource, type PickResult } from '@/services/photoService';
+import { useThemeColors } from '@/theme/ThemeContext';
+import type { PickedImage } from '@/types/user';
 import { Avatar } from './Avatar';
-import { Icon } from './Icon';
 
 export type PhotoPickerProps = {
   name: string;
@@ -36,8 +41,7 @@ export const PhotoPicker: React.FC<PhotoPickerProps> = ({
   size = 96,
   label = 'Escolher foto',
 }) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
+  const colors = useThemeColors();
   const [picking, setPicking] = useState<boolean>(false);
 
   const run = useCallback(
@@ -46,8 +50,10 @@ export const PhotoPicker: React.FC<PhotoPickerProps> = ({
       pickPhoto(source)
         .then((result: PickResult) => {
           if (result.status === 'picked') {
+            haptics.success();
             onPicked(result.image);
           } else if (result.status === 'denied') {
+            haptics.error();
             onError(result.message);
           }
         })
@@ -58,6 +64,7 @@ export const PhotoPicker: React.FC<PhotoPickerProps> = ({
   );
 
   const handlePress = useCallback((): void => {
+    haptics.tap();
     if (Platform.OS === 'web') {
       run('library');
       return;
@@ -70,48 +77,40 @@ export const PhotoPicker: React.FC<PhotoPickerProps> = ({
   }, [label, run]);
 
   const working: boolean = busy || picking;
+  const inactive: boolean = disabled || working;
 
   return (
-    <Pressable
+    <PressableScale
+      activeScale={0.95}
       onPress={handlePress}
-      disabled={disabled || working}
+      disabled={inactive}
       accessibilityRole="button"
       accessibilityLabel={label}
-      style={({ pressed }: { pressed: boolean }) => [styles.wrap, pressed ? styles.pressed : null]}
+      accessibilityState={{ disabled: inactive, busy: working }}
+      className={cn('items-center self-center', disabled && !working && 'opacity-60')}
     >
       <View>
-        <Avatar name={name.length > 0 ? name : '?'} uid={uid} photoUrl={photoUri} size={size} variant={variant} />
-        <View style={styles.badge}>
-          {working ? (
-            <ActivityIndicator size="small" color={colors.onPrimary} />
-          ) : (
-            <Icon name="camera" size={16} color={colors.onPrimary} />
-          )}
+        <View className="border-border rounded-full border p-1">
+          <Avatar name={name.length > 0 ? name : '?'} uid={uid} photoUrl={photoUri} size={size} variant={variant} />
         </View>
+        <Animated.View
+          entering={popIn}
+          className="bg-primary border-card absolute bottom-0.5 right-0.5 size-8 items-center justify-center rounded-full border-[3px] shadow-md shadow-primary/30"
+        >
+          {working ? (
+            <Animated.View key="spinner" entering={fadeIn}>
+              <ActivityIndicator size="small" color={colors.primaryForeground} />
+            </Animated.View>
+          ) : (
+            <Animated.View key="camera" entering={fadeIn}>
+              <Icon as={Camera} strokeWidth={2.25} className="text-primary-foreground size-3.5" />
+            </Animated.View>
+          )}
+        </Animated.View>
       </View>
-      <Text style={styles.label}>{label}</Text>
-    </Pressable>
+      <Text className="text-primary mt-3 text-sm font-medium">{label}</Text>
+    </PressableScale>
   );
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    wrap: { alignItems: 'center', alignSelf: 'center' },
-    pressed: { opacity: 0.8 },
-    badge: {
-      position: 'absolute',
-      right: -2,
-      bottom: -2,
-      width: 32,
-      height: 32,
-      borderRadius: 16,
-      backgroundColor: colors.primary,
-      borderWidth: 2,
-      borderColor: colors.surface,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    label: { marginTop: spacing.sm, fontSize: 14, fontWeight: '600', color: colors.primary },
-  });
 
 export default PhotoPicker;

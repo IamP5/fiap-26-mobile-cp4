@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Platform, View } from 'react-native';
 import { DarkTheme, DefaultTheme, NavigationContainer, type Theme as NavigationTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
@@ -18,12 +18,13 @@ import { LoginScreen } from '../screens/LoginScreen';
 import { ProfileScreen } from '../screens/ProfileScreen';
 import { RegisterScreen } from '../screens/RegisterScreen';
 import { UsersScreen } from '../screens/UsersScreen';
-import { useThemeContext, useThemedStyles } from '../theme/ThemeContext';
-import type { Theme } from '../theme/theme';
+import { useThemeContext } from '../theme/ThemeContext';
 import type { RootStackParamList } from '../types/navigation';
 import { navigationRef } from './navigationRef';
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
+
+const taskAnimation = Platform.OS === 'ios' ? 'slide_from_bottom' : 'default';
 
 /** Overlays that live above every signed-in screen. */
 const SessionOverlays: React.FC = () => {
@@ -31,12 +32,16 @@ const SessionOverlays: React.FC = () => {
   const { banner, dismissBanner, openConversation } = useNotifications();
   return (
     <>
-      {connected ? null : (
-        <View style={overlayStyles.top}>
-          <OfflineBanner />
-        </View>
-      )}
-      {banner !== null ? <InAppNotification payload={banner} onPress={openConversation} onDismiss={dismissBanner} /> : null}
+      {connected ? null : <OfflineBanner />}
+      {banner !== null ? (
+        // Keyed per message so a new arrival replaces the toast with a fresh drop-in.
+        <InAppNotification
+          key={`${banner.conversationId}:${banner.title ?? ''}:${banner.body ?? ''}`}
+          payload={banner}
+          onPress={openConversation}
+          onDismiss={dismissBanner}
+        />
+      ) : null}
     </>
   );
 };
@@ -44,7 +49,6 @@ const SessionOverlays: React.FC = () => {
 export const RootNavigator: React.FC = () => {
   const { user, initializing } = useAuth();
   const { theme, scheme } = useThemeContext();
-  const styles = useThemedStyles(createStyles);
 
   const navigationTheme = useMemo<NavigationTheme>(() => {
     const base: NavigationTheme = scheme === 'dark' ? DarkTheme : DefaultTheme;
@@ -54,16 +58,17 @@ export const RootNavigator: React.FC = () => {
         ...base.colors,
         primary: theme.colors.primary,
         background: theme.colors.background,
-        card: theme.colors.surface,
-        text: theme.colors.text,
-        border: theme.colors.separator,
+        card: theme.colors.background,
+        text: theme.colors.foreground,
+        border: theme.colors.border,
+        notification: theme.colors.destructive,
       },
     };
   }, [scheme, theme]);
 
   if (initializing) {
     return (
-      <View style={styles.centered}>
+      <View className="bg-background flex-1 items-center justify-center">
         <Loading label="Carregando..." />
       </View>
     );
@@ -74,21 +79,25 @@ export const RootNavigator: React.FC = () => {
       <Stack.Navigator
         screenOptions={{
           headerShown: false,
-          animation: 'slide_from_right',
+          // Each platform's own push: the iOS slide with full-width swipe-back
+          // (Telegram/WhatsApp iOS), the system Material transition on Android.
+          animation: 'default',
+          fullScreenGestureEnabled: true,
           contentStyle: { backgroundColor: theme.colors.background },
         }}
       >
         {user === null ? (
           <>
-            <Stack.Screen name="Login" component={LoginScreen} />
+            <Stack.Screen name="Login" component={LoginScreen} options={{ animation: 'fade' }} />
             <Stack.Screen name="Register" component={RegisterScreen} />
           </>
         ) : (
           <>
             <Stack.Screen name="Home" component={HomeScreen} />
             <Stack.Screen name="Chat" component={ChatScreen} />
-            <Stack.Screen name="Users" component={UsersScreen} />
-            <Stack.Screen name="GroupForm" component={GroupFormScreen} />
+            {/* "New chat" / "new group" are tasks, not drill-downs: on iOS they rise from the bottom. */}
+            <Stack.Screen name="Users" component={UsersScreen} options={{ animation: taskAnimation }} />
+            <Stack.Screen name="GroupForm" component={GroupFormScreen} options={{ animation: taskAnimation }} />
             <Stack.Screen name="GroupInfo" component={GroupInfoScreen} />
             <Stack.Screen name="Profile" component={ProfileScreen} />
           </>
@@ -106,7 +115,7 @@ export const RootNavigator: React.FC = () => {
   return (
     <DirectoryProvider key={user.uid}>
       <NotificationProvider user={user}>
-        <View style={styles.fill}>
+        <View className="flex-1">
           {navigator}
           <SessionOverlays />
         </View>
@@ -114,13 +123,3 @@ export const RootNavigator: React.FC = () => {
     </DirectoryProvider>
   );
 };
-
-const overlayStyles = StyleSheet.create({
-  top: { position: 'absolute', top: 0, left: 0, right: 0, pointerEvents: 'none' },
-});
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    fill: { flex: 1 },
-    centered: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
-  });

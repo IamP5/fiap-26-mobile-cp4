@@ -1,20 +1,29 @@
+import { MessageCircle, Users, WifiOff, X } from 'lucide-react-native';
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
+import Animated, { FadeInDown, FadeOutUp } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { radius, spacing, type Theme } from '../theme/theme';
-import type { PushPayload } from '../types/notification';
-import { Icon } from './Icon';
+import { PressableScale } from '@/components/motion/PressableScale';
+import { Icon } from '@/components/ui/icon';
+import { dropIn, dropOut } from '@/lib/motion';
+import type { PushPayload } from '@/types/notification';
 
 /** "Sem conexão" strip, driven by the Realtime Database connection state. */
 export const OfflineBanner: React.FC = () => {
-  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   return (
-    <View style={[styles.offline, { paddingTop: insets.top + spacing.xs }]} accessibilityRole="alert">
-      <Text style={styles.offlineText}>Sem conexão. As mensagens serão sincronizadas quando a internet voltar.</Text>
-    </View>
+    <Animated.View
+      entering={FadeInDown.duration(220)}
+      exiting={FadeOutUp.duration(180)}
+      className="bg-foreground absolute left-0 right-0 top-0 flex-row items-center justify-center gap-2 px-4 pb-1.5"
+      style={{ paddingTop: insets.top + 4 }}
+      pointerEvents="none"
+      accessibilityRole="alert"
+    >
+      <Icon as={WifiOff} className="text-background size-3.5" />
+      <Text className="text-background text-xs font-medium">Sem conexão · sincronizando quando voltar</Text>
+    </Animated.View>
   );
 };
 
@@ -24,73 +33,52 @@ export type InAppNotificationProps = {
   onDismiss: () => void;
 };
 
-/** A push that arrived with the app open (the OS does not display those). */
+/** Sonner-style toast for messages that arrive while the app is open. */
 export const InAppNotification: React.FC<InAppNotificationProps> = ({ payload, onPress, onDismiss }) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   return (
-    <View style={[styles.toastWrap, { top: insets.top + spacing.sm }]}>
-      <View style={styles.toast}>
-        <Pressable
+    <Animated.View
+      entering={dropIn}
+      exiting={dropOut}
+      className="absolute left-3 right-3 z-50"
+      style={{ top: insets.top + 8 }}
+      pointerEvents="box-none"
+    >
+      <View className="bg-popover border-border flex-row items-center gap-3 rounded-2xl border p-3 shadow-xl shadow-black/15">
+        <PressableScale
+          activeScale={0.98}
           onPress={() => onPress(payload)}
           accessibilityRole="button"
           accessibilityLabel={`Nova notificação: ${payload.title ?? ''} ${payload.body ?? ''}. Toque para abrir.`}
-          style={({ pressed }: { pressed: boolean }) => [styles.toastMain, pressed ? styles.pressed : null]}
+          className="flex-1 flex-row items-center gap-3"
         >
-          <View style={styles.toastIcon}>
-            <Icon name={payload.conversationType === 'group' ? 'group' : 'chat'} size={16} color={colors.onPrimary} />
+          <View className="bg-primary size-9 items-center justify-center rounded-full">
+            <Icon
+              as={payload.conversationType === 'group' ? Users : MessageCircle}
+              className="text-primary-foreground size-4"
+            />
           </View>
-          <View style={styles.toastText}>
-            <Text style={styles.toastTitle} numberOfLines={1}>
+          <View className="flex-1">
+            <Text className="text-popover-foreground text-sm font-semibold" numberOfLines={1}>
               {payload.title ?? 'Nova mensagem'}
             </Text>
             {payload.body !== null ? (
-              <Text style={styles.toastBody} numberOfLines={1}>
+              <Text className="text-muted-foreground text-[13px]" numberOfLines={1}>
                 {payload.body}
               </Text>
             ) : null}
           </View>
-        </Pressable>
-        <Pressable onPress={onDismiss} hitSlop={10} accessibilityRole="button" accessibilityLabel="Fechar notificação">
-          <Icon name="close" size={12} color={colors.muted} />
+        </PressableScale>
+        <Pressable
+          onPress={onDismiss}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel="Fechar notificação"
+          className="size-6 items-center justify-center rounded-full active:bg-accent"
+        >
+          <Icon as={X} className="text-muted-foreground size-3.5" />
         </Pressable>
       </View>
-    </View>
+    </Animated.View>
   );
 };
-
-const createStyles = ({ colors, elevation }: Theme) =>
-  StyleSheet.create({
-    offline: {
-      backgroundColor: colors.dangerSurface,
-      paddingHorizontal: spacing.md,
-      paddingBottom: spacing.xs,
-    },
-    offlineText: { fontSize: 12, color: colors.dangerText, textAlign: 'center' },
-    toastWrap: { position: 'absolute', left: spacing.md, right: spacing.md, zIndex: 50, pointerEvents: 'box-none' },
-    toast: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.sm,
-      padding: spacing.sm + spacing.xs,
-      borderRadius: radius.lg,
-      backgroundColor: colors.surface,
-      borderWidth: 1,
-      borderColor: colors.border,
-      ...elevation.floating,
-    },
-    toastMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-    pressed: { opacity: 0.9 },
-    toastIcon: {
-      width: 32,
-      height: 32,
-      borderRadius: 16,
-      backgroundColor: colors.primary,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    toastText: { flex: 1 },
-    toastTitle: { fontSize: 15, fontWeight: '700', color: colors.text },
-    toastBody: { marginTop: 1, fontSize: 13, color: colors.muted },
-  });

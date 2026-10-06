@@ -1,11 +1,16 @@
+import { Crown } from 'lucide-react-native';
 import React, { useCallback } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { androidRipple, layout, radius, spacing, type Theme } from '../theme/theme';
-import type { PublicProfile } from '../types/user';
+import { Icon } from '@/components/ui/icon';
+import { haptics } from '@/lib/haptics';
+import { fadeIn, fadeOut } from '@/lib/motion';
+import { cn } from '@/lib/utils';
+import { useThemeColors } from '@/theme/ThemeContext';
+import { androidRipple } from '@/theme/theme';
+import type { PublicProfile } from '@/types/user';
 import { Avatar } from './Avatar';
-import { Icon } from './Icon';
 
 export type GroupMemberItemProps = {
   member: PublicProfile;
@@ -25,92 +30,61 @@ export const GroupMemberItem: React.FC<GroupMemberItemProps> = ({
   onRemove,
   removing = false,
 }) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
+  const colors = useThemeColors();
   const handlePress = useCallback((): void => onPress(member), [onPress, member]);
-  const handleRemove = useCallback((): void => onRemove?.(member), [onRemove, member]);
+  const handleRemove = useCallback((): void => {
+    haptics.tap();
+    onRemove?.(member);
+  }, [onRemove, member]);
 
-  // The row and the remove button are siblings: nested buttons are invalid
-  // on the web and ambiguous for screen readers.
   return (
-    <View style={styles.row}>
+    <View className={cn('flex-row items-center', onRemove !== undefined && 'pr-2')}>
       <Pressable
         onPress={handlePress}
         accessibilityRole="button"
         accessibilityLabel={`Ver perfil de ${member.name}${isOwner ? ', proprietário' : ''}`}
         android_ripple={androidRipple(colors.ripple)}
-        style={({ pressed }: { pressed: boolean }) => [styles.main, pressed ? styles.pressed : null]}
+        className="ios:active:bg-accent web:active:bg-accent min-h-[60px] flex-1 flex-row items-center gap-3 px-4 py-2"
       >
-        <Avatar name={member.name} uid={member.uid} photoUrl={member.photoUrl} size={layout.avatar.md} />
-        <View style={styles.info}>
-          <Text style={styles.name} numberOfLines={1}>
-            {isMe ? `${member.name} (você)` : member.name}
-          </Text>
-          {isOwner ? (
-            <View style={styles.ownerTag}>
-              <Text style={styles.ownerText}>Proprietário</Text>
-            </View>
-          ) : null}
-        </View>
+        <Avatar name={member.name} uid={member.uid} photoUrl={member.photoUrl} size={46} />
+        <Text className="text-foreground min-w-0 flex-1 text-[16px] font-medium" numberOfLines={1}>
+          {isMe ? `${member.name} (você)` : member.name}
+        </Text>
+        {/* Role as trailing text, like Telegram ("owner") and WhatsApp ("Admin"). */}
+        {isOwner ? (
+          <View className="flex-row items-center gap-1">
+            <Icon as={Crown} className="text-primary size-3.5" />
+            <Text className="text-primary text-[13px] font-medium">Proprietário</Text>
+          </View>
+        ) : null}
       </Pressable>
       {onRemove !== undefined ? (
         removing ? (
-          <ActivityIndicator color={colors.danger} />
-        ) : (
-          <Pressable
-            onPress={handleRemove}
-            hitSlop={8}
-            accessibilityRole="button"
-            accessibilityLabel={`Remover ${member.name} do grupo`}
-            style={({ pressed }: { pressed: boolean }) => [styles.remove, pressed ? styles.removePressed : null]}
+          <Animated.View
+            key="removing"
+            entering={fadeIn}
+            exiting={fadeOut}
+            className="h-8 w-[76px] items-center justify-center"
           >
-            <Icon name="close" size={12} color={colors.dangerText} />
-            <Text style={styles.removeText}>Remover</Text>
-          </Pressable>
+            <ActivityIndicator color={colors.destructive} />
+          </Animated.View>
+        ) : (
+          <Animated.View key="remove" entering={fadeIn} exiting={fadeOut}>
+            <Pressable
+              onPress={handleRemove}
+              hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel={`Remover ${member.name} do grupo`}
+              android_ripple={androidRipple(colors.ripple)}
+              className="h-8 justify-center overflow-hidden rounded-full px-3 active:opacity-60"
+            >
+              <Text className="text-destructive text-[15px] font-medium">Remover</Text>
+            </Pressable>
+          </Animated.View>
         )
       ) : null}
     </View>
   );
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    row: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingRight: spacing.md,
-    },
-    main: {
-      flex: 1,
-      flexDirection: 'row',
-      alignItems: 'center',
-      paddingVertical: spacing.sm,
-      paddingLeft: spacing.md,
-      paddingRight: spacing.sm,
-      minHeight: 60,
-    },
-    pressed: { backgroundColor: colors.surfaceSunken },
-    info: { flex: 1, marginLeft: spacing.md, alignItems: 'flex-start' },
-    name: { fontSize: 16, fontWeight: '600', color: colors.text },
-    ownerTag: {
-      marginTop: 3,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 1,
-      borderRadius: radius.pill,
-      backgroundColor: colors.primarySurface,
-    },
-    ownerText: { fontSize: 11, fontWeight: '700', color: colors.primary },
-    remove: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.xs,
-      paddingHorizontal: spacing.sm + spacing.xxs,
-      minHeight: 32,
-      borderRadius: radius.pill,
-      backgroundColor: colors.dangerSurface,
-    },
-    removePressed: { opacity: 0.7 },
-    removeText: { fontSize: 13, fontWeight: '600', color: colors.dangerText },
-  });
 
 export default GroupMemberItem;

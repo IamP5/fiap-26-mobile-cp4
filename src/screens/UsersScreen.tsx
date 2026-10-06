@@ -1,7 +1,10 @@
-import React, { useCallback, useMemo, useState } from 'react';
-import { FlatList, type ListRenderItemInfo, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { X } from 'lucide-react-native';
+import { type ListRenderItemInfo, Pressable, ScrollView, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { Avatar } from '../components/Avatar';
 import { EmptyState } from '../components/EmptyState';
 import { ErrorMessage } from '../components/ErrorMessage';
 import { PrimaryButton } from '../components/PrimaryButton';
@@ -9,10 +12,13 @@ import { ScreenHeader } from '../components/ScreenHeader';
 import { SearchBar } from '../components/SearchBar';
 import { UserItem } from '../components/UserItem';
 import { UserItemSkeleton } from '../components/UserItemSkeleton';
-import { useDirectory } from '../contexts/DirectoryContext';
+import { Icon } from '../components/ui/icon';
+import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
 import { useAuth } from '../hooks/useAuth';
-import { useThemedStyles } from '../theme/ThemeContext';
-import { layout, spacing, type Theme } from '../theme/theme';
+import { sectionTitleClassName } from '../components/native/List';
+import { haptics } from '../lib/haptics';
+import { cn } from '../lib/utils';
+import { fadeIn, fadeOut, layout, listItemEnter, popIn, popOut } from '../lib/motion';
 import type { ScreenProps } from '../types/navigation';
 import type { PublicProfile } from '../types/user';
 import { buildDirectConversationId } from '../utils/conversationId';
@@ -25,10 +31,9 @@ import { matchesSearch } from '../utils/search';
  * The current user is never listed, so nobody can chat with themselves.
  */
 export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route }) => {
-  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
-  const { profiles, loading, error, reload } = useDirectory();
+  const { profiles, byUid, loading, error, reload } = useDirectory();
   const params = route.params;
   const meUid: string = user?.uid ?? '';
   const picking: boolean = params.mode === 'pickMembers';
@@ -49,6 +54,10 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
   );
 
   const remaining: number = maxSelectable - selected.length;
+  const selectedProfiles = useMemo<PublicProfile[]>(
+    () => selected.map((uid: string) => profileOrFallback(byUid, uid)),
+    [selected, byUid],
+  );
 
   const handlePress = useCallback(
     (profile: PublicProfile): void => {
@@ -64,13 +73,16 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
       }
       setNotice(null);
       if (selected.includes(profile.uid)) {
+        haptics.select();
         setSelected(selected.filter((uid: string) => uid !== profile.uid));
         return;
       }
       if (selected.length >= maxSelectable) {
+        haptics.error();
         setNotice(maxSelectable === 0 ? 'O grupo não tem vagas disponíveis.' : 'Limite de integrantes atingido.');
         return;
       }
+      haptics.select();
       setSelected([...selected, profile.uid]);
     },
     [meUid, picking, maxSelectable, navigation, selected],
@@ -83,17 +95,29 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
     navigation.popTo('GroupForm', { groupId: params.groupId, pickedMemberIds: selected }, { merge: true });
   }, [navigation, params, selected]);
 
+  const showingList: boolean = !loading && error === null && others.length > 0;
+  // Rows cascade in only the first time the directory appears; searching or
+  // selecting must not replay the entrance.
+  const staggerRows = useRef<boolean>(true);
+  useEffect(() => {
+    if (showingList) {
+      staggerRows.current = false;
+    }
+  }, [showingList]);
+
   const renderItem = useCallback(
-    ({ item }: ListRenderItemInfo<PublicProfile>) => {
+    ({ item, index }: ListRenderItemInfo<PublicProfile>) => {
       const locked: boolean = lockedIds.includes(item.uid);
       return (
-        <UserItem
-          user={item}
-          onPress={handlePress}
-          selected={picking ? locked || selected.includes(item.uid) : undefined}
-          disabled={locked}
-          caption={locked ? 'Já está no grupo' : undefined}
-        />
+        <Animated.View entering={staggerRows.current ? listItemEnter(index) : undefined}>
+          <UserItem
+            user={item}
+            onPress={handlePress}
+            selected={picking ? locked || selected.includes(item.uid) : undefined}
+            disabled={locked}
+            caption={locked ? 'Já está no grupo' : undefined}
+          />
+        </Animated.View>
       );
     },
     [handlePress, picking, selected, lockedIds],
@@ -101,11 +125,17 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
 
   const renderBody = (): React.ReactElement => {
     if (loading) {
-      return <FlatList data={[0, 1, 2, 3]} keyExtractor={(i: number) => `s${i}`} renderItem={() => <UserItemSkeleton />} />;
+      return (
+        <View className="pt-2">
+          {[0, 1, 2, 3, 4].map((row: number) => (
+            <UserItemSkeleton key={`s${row}`} index={row} />
+          ))}
+        </View>
+      );
     }
     if (error !== null) {
       return (
-        <View style={styles.padded}>
+        <View className="px-4">
           <ErrorMessage message={error} onRetry={reload} />
         </View>
       );
@@ -123,19 +153,22 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
       return <EmptyState title="Nenhum resultado" description={`Ninguém encontrado para "${query.trim()}".`} />;
     }
     return (
-      <FlatList
+      <Animated.FlatList
         data={others}
         keyExtractor={(item: PublicProfile) => item.uid}
         renderItem={renderItem}
-        ItemSeparatorComponent={() => <View style={styles.separator} />}
+        itemLayoutAnimation={layout}
+        ListHeaderComponent={<Text className={cn(sectionTitleClassName, 'px-4 pb-1.5 pt-3')}>Contatos</Text>}
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ paddingBottom: insets.bottom + (picking ? 96 : spacing.lg) }}
+        keyboardDismissMode="on-drag"
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{ paddingBottom: insets.bottom + (picking ? 96 : 16) }}
       />
     );
   };
 
   return (
-    <View style={styles.container}>
+    <View className="bg-background flex-1">
       <ScreenHeader
         title={picking ? 'Selecionar integrantes' : 'Nova conversa'}
         subtitle={
@@ -147,13 +180,56 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
         }
         onBack={navigation.goBack}
       />
-      <View style={styles.searchWrap}>
+      <View className="px-4 pb-1 pt-3">
         <SearchBar value={query} onChangeText={setQuery} placeholder="Buscar por nome" />
       </View>
-      {notice !== null ? <Text style={styles.notice}>{notice}</Text> : null}
-      <View style={styles.body}>{renderBody()}</View>
+      {picking && selectedProfiles.length > 0 ? (
+        <Animated.View entering={fadeIn} exiting={fadeOut} className="border-border border-b">
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            contentContainerClassName="gap-3 px-4 py-3"
+          >
+            {selectedProfiles.map((profile: PublicProfile) => (
+              <Animated.View key={profile.uid} entering={popIn} exiting={popOut} layout={layout}>
+                <Pressable
+                  onPress={() => handlePress(profile)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Remover ${profile.name} da seleção`}
+                  className="w-14 items-center gap-1 active:opacity-70"
+                >
+                  <View>
+                    <Avatar name={profile.name} uid={profile.uid} photoUrl={profile.photoUrl} size={48} />
+                    <View className="bg-foreground border-background absolute -right-0.5 -top-0.5 size-5 items-center justify-center rounded-full border-2">
+                      <Icon as={X} strokeWidth={3} className="text-background size-2.5" />
+                    </View>
+                  </View>
+                  <Text className="text-foreground text-[11px]" numberOfLines={1}>
+                    {profile.name.split(' ')[0] ?? profile.name}
+                  </Text>
+                </Pressable>
+              </Animated.View>
+            ))}
+          </ScrollView>
+        </Animated.View>
+      ) : null}
+      {notice !== null ? (
+        <Animated.Text
+          entering={fadeIn}
+          exiting={fadeOut}
+          className="text-destructive px-5 pt-2 text-[13px]"
+          accessibilityLiveRegion="polite"
+        >
+          {notice}
+        </Animated.Text>
+      ) : null}
+      <View className="flex-1">{renderBody()}</View>
       {picking ? (
-        <View style={[styles.footer, { paddingBottom: insets.bottom + spacing.sm }]}>
+        <View
+          className="bg-background absolute inset-x-0 bottom-0 px-4 pt-3"
+          style={{ paddingBottom: insets.bottom + 12 }}
+        >
           <PrimaryButton
             label={selected.length === 0 ? 'Concluir' : `Concluir (${selected.length})`}
             onPress={handleConfirm}
@@ -163,26 +239,5 @@ export const UsersScreen: React.FC<ScreenProps<'Users'>> = ({ navigation, route 
     </View>
   );
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    searchWrap: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
-    notice: { paddingHorizontal: spacing.md, paddingBottom: spacing.sm, color: colors.dangerText, fontSize: 13 },
-    body: { flex: 1 },
-    padded: { paddingHorizontal: spacing.md },
-    separator: { height: layout.hairline, marginLeft: layout.avatar.md + spacing.md * 2, backgroundColor: colors.separator },
-    footer: {
-      position: 'absolute',
-      left: 0,
-      right: 0,
-      bottom: 0,
-      paddingHorizontal: spacing.md,
-      paddingTop: spacing.sm,
-      backgroundColor: colors.surface,
-      borderTopWidth: layout.hairline,
-      borderTopColor: colors.separator,
-    },
-  });
 
 export default UsersScreen;

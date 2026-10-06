@@ -1,90 +1,71 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, Pressable, StyleSheet } from 'react-native';
+import { ChevronDown } from 'lucide-react-native';
+import React from 'react';
+import { Pressable } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { androidRipple, interaction, layout, spacing, type Theme } from '../theme/theme';
-import { Icon } from './Icon';
+import { Glass } from '@/components/native/Glass';
+import { Icon } from '@/components/ui/icon';
+import { haptics } from '@/lib/haptics';
+import { riseIn, riseOut } from '@/lib/motion';
+import { hasLiquidGlass, isMaterial } from '@/lib/platform';
+import { useThemeColors } from '@/theme/ThemeContext';
+import { androidRipple } from '@/theme/theme';
 
 export type ScrollToLatestButtonProps = {
   visible: boolean;
+  /** Distance from the bottom edge (clears a floating composer). */
+  bottom?: number;
   onPress: () => void;
 };
 
-const ANIMATION_DURATION_MS = 150;
-
-export const ScrollToLatestButton: React.FC<ScrollToLatestButtonProps> = ({
-  visible,
-  onPress,
-}: ScrollToLatestButtonProps) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
-  const progress = useRef(new Animated.Value(visible ? 1 : 0)).current;
-
-  useEffect(() => {
-    // Pop in with a spring, fade out with a quick timing — overshoot only
-    // reads as intentional in the appearing direction.
-    if (visible) {
-      Animated.spring(progress, {
-        toValue: 1,
-        ...interaction.spring.pop,
-        useNativeDriver: true,
-      }).start();
-    } else {
-      Animated.timing(progress, {
-        toValue: 0,
-        duration: ANIMATION_DURATION_MS,
-        useNativeDriver: true,
-      }).start();
-    }
-  }, [visible, progress]);
+/**
+ * Floating "jump to latest" control shown once the user scrolls up: a Liquid
+ * Glass circle on iOS, a small elevated surface on Android (WhatsApp).
+ */
+export const ScrollToLatestButton: React.FC<ScrollToLatestButtonProps> = ({ visible, bottom = 12, onPress }) => {
+  const colors = useThemeColors();
+  if (!visible) {
+    return null;
+  }
+  const handlePress = (): void => {
+    haptics.tap();
+    onPress();
+  };
+  const glyph = <Icon as={ChevronDown} className="text-foreground size-[22px]" />;
 
   return (
+    // Liquid Glass does not render under a parent animating from opacity 0,
+    // so on iOS 26 the glass circle simply appears.
     <Animated.View
-      style={[
-        styles.container,
-        {
-          opacity: progress.interpolate({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: 'clamp' }),
-          transform: [{ scale: progress.interpolate({ inputRange: [0, 1], outputRange: [0.6, 1] }) }],
-        },
-      ]}
-      pointerEvents={visible ? 'auto' : 'none'}
+      entering={hasLiquidGlass ? undefined : riseIn}
+      exiting={hasLiquidGlass ? undefined : riseOut}
+      style={{ position: 'absolute', right: 12, bottom }}
     >
-      <Pressable
-        onPress={onPress}
-        accessibilityRole="button"
-        accessibilityLabel="Ir para a mensagem mais recente"
-        android_ripple={androidRipple(colors.ripple)}
-        style={({ pressed }: { pressed: boolean }) => [styles.button, pressed ? styles.buttonPressed : null]}
-      >
-        <Icon name="chevron-down" color={colors.primary} />
-      </Pressable>
+      {isMaterial ? (
+        <Pressable
+          onPress={handlePress}
+          accessibilityRole="button"
+          accessibilityLabel="Ir para a mensagem mais recente"
+          android_ripple={androidRipple(colors.ripple)}
+          className="size-10 items-center justify-center overflow-hidden rounded-full"
+          style={{ elevation: 3, backgroundColor: colors.card }}
+        >
+          {glyph}
+        </Pressable>
+      ) : (
+        <Glass radius={20} className="size-10">
+          <Pressable
+            onPress={handlePress}
+            accessibilityRole="button"
+            accessibilityLabel="Ir para a mensagem mais recente"
+            className="size-10 items-center justify-center active:opacity-60"
+          >
+            {glyph}
+          </Pressable>
+        </Glass>
+      )}
     </Animated.View>
   );
 };
-
-const createStyles = ({ colors, elevation }: Theme) =>
-  StyleSheet.create({
-    container: {
-      position: 'absolute',
-      right: spacing.md,
-      bottom: spacing.md,
-    },
-    // Telegram-style FAB: surface disc with a subtle border ring so it
-    // separates from same-hue bubbles beneath it, plus a floating shadow.
-    button: {
-      width: layout.touchTarget,
-      height: layout.touchTarget,
-      borderRadius: layout.touchTarget / 2,
-      backgroundColor: colors.surface,
-      borderWidth: 1,
-      borderColor: colors.border,
-      alignItems: 'center',
-      justifyContent: 'center',
-      ...elevation.floating,
-    },
-    buttonPressed: {
-      opacity: 0.85,
-    },
-  });
 
 export default ScrollToLatestButton;

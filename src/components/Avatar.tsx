@@ -1,12 +1,12 @@
+import { Users } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Image, StyleSheet, Text, View } from 'react-native';
+import { Image, Text, View } from 'react-native';
 
-import { useThemeColors } from '../theme/ThemeContext';
-import { layout, maxFontScale } from '../theme/theme';
-import { Icon } from './Icon';
+import { Icon } from '@/components/ui/icon';
+import { cn } from '@/lib/utils';
+import { useThemeColors } from '@/theme/ThemeContext';
+import { maxFontScale } from '@/theme/theme';
 
-// Lifted verbatim from the previous UserItem implementation so both the
-// contact list and chat bubbles share the exact same fallback rules.
 export const initialsOf = (name: string): string => {
   const parts: string[] = name.trim().split(/\s+/).filter((p: string) => p.length > 0);
   if (parts.length === 0) {
@@ -21,8 +21,8 @@ export const initialsOf = (name: string): string => {
 };
 
 // Simple deterministic char-code hash so the same uid always maps to the
-// same hue, without needing a crypto-quality hash. The palette is identical
-// in both schemes, so avatars never shift color on a theme flip.
+// same hue. The palette is identical in both schemes, so avatars never shift
+// color on a theme flip.
 export const avatarColorFor = (uid: string, palette: readonly string[]): string => {
   let hash = 0;
   for (let i = 0; i < uid.length; i += 1) {
@@ -44,22 +44,20 @@ export type AvatarProps = {
   /** Default image when there is no photo: initials for people, a group
    * glyph for groups. */
   variant?: 'person' | 'group';
+  className?: string;
 };
 
 export const Avatar: React.FC<AvatarProps> = ({
   name,
   uid,
   photoUrl,
-  size = layout.avatar.md,
+  size = 44,
   variant = 'person',
+  className,
 }: AvatarProps) => {
   const colors = useThemeColors();
   const initials: string = useMemo(() => initialsOf(name), [name]);
-  const backgroundColor: string = useMemo(
-    () => avatarColorFor(uid, colors.avatarPalette),
-    [uid, colors.avatarPalette],
-  );
-  const fontSize: number = Math.round(size * 0.38);
+  const tint: string = useMemo(() => avatarColorFor(uid, colors.avatarPalette), [uid, colors.avatarPalette]);
 
   // A photo that fails to load falls back to initials; a NEW url gets a fresh
   // chance (e.g. after re-syncing the provider photo).
@@ -67,31 +65,31 @@ export const Avatar: React.FC<AvatarProps> = ({
   useEffect(() => {
     setPhotoFailed(false);
   }, [photoUrl]);
-  const handlePhotoError = useCallback((): void => {
-    setPhotoFailed(true);
-  }, []);
+  const handlePhotoError = useCallback((): void => setPhotoFailed(true), []);
 
-  const showPhoto: boolean =
-    typeof photoUrl === 'string' && photoUrl.length > 0 && !photoFailed;
+  const showPhoto: boolean = typeof photoUrl === 'string' && photoUrl.length > 0 && !photoFailed;
+  const dimension = { width: size, height: size, borderRadius: size / 2 };
 
   return (
     <View
-      style={[styles.circle, { width: size, height: size, borderRadius: size / 2, backgroundColor }]}
+      className={cn('items-center justify-center overflow-hidden', className)}
+      style={[dimension, { backgroundColor: tint }]}
       importantForAccessibility="no-hide-descendants"
       accessibilityElementsHidden
     >
       {showPhoto ? (
         <Image
           source={{ uri: photoUrl as string }}
-          style={{ width: size, height: size, borderRadius: size / 2 }}
+          style={dimension}
           onError={handlePhotoError}
           accessibilityIgnoresInvertColors
         />
       ) : variant === 'group' ? (
-        <Icon name="group" size={Math.round(size * 0.56)} color={colors.avatarText} />
+        <Icon as={Users} size={Math.round(size * 0.46)} className="text-white" />
       ) : (
         <Text
-          style={[styles.initials, { fontSize, color: colors.avatarText }]}
+          className="font-semibold text-white"
+          style={{ fontSize: Math.round(size * 0.38) }}
           maxFontSizeMultiplier={maxFontScale.chrome}
         >
           {initials}
@@ -100,16 +98,5 @@ export const Avatar: React.FC<AvatarProps> = ({
     </View>
   );
 };
-
-const styles = StyleSheet.create({
-  circle: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    overflow: 'hidden',
-  },
-  initials: {
-    fontWeight: '700',
-  },
-});
 
 export default Avatar;

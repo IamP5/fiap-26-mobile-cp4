@@ -1,20 +1,22 @@
+import './src/global.css';
+
+import { PortalHost } from '@rn-primitives/portal';
 import { StatusBar } from 'expo-status-bar';
 import React from 'react';
-import { StyleSheet, View } from 'react-native';
+import { View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AuthProvider } from './src/contexts/AuthContext';
 import { RootNavigator } from './src/navigation/RootNavigator';
-import { ThemeProvider, useThemeContext, useThemedStyles } from './src/theme/ThemeContext';
-import type { Theme } from './src/theme/theme';
+import { ThemeProvider, useThemeContext } from './src/theme/ThemeContext';
 
 const ThemedRoot: React.FC = () => {
   const { scheme } = useThemeContext();
-  const styles = useThemedStyles(createStyles);
   return (
-    <View style={styles.root}>
+    <View className="bg-background flex-1">
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
       <RootNavigator />
+      <PortalHost />
     </View>
   );
 };
@@ -28,10 +30,5 @@ const App: React.FC = () => (
     </ThemeProvider>
   </SafeAreaProvider>
 );
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    root: { flex: 1, backgroundColor: colors.background },
-  });
 
 export default App;

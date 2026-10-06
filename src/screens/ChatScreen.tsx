@@ -1,20 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
+  type LayoutChangeEvent,
   Keyboard,
   KeyboardAvoidingView,
   type ListRenderItemInfo,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
-  StyleSheet,
+  Pressable,
   Text,
   View,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BellOff, X } from 'lucide-react-native';
+
 import { Avatar } from '../components/Avatar';
+import { Backdrop } from '../components/Backdrop';
+import { EdgeFade } from '../components/native/EdgeFade';
+import { Icon } from '../components/ui/icon';
 import { ChatInput } from '../components/ChatInput';
 import { ChatMessage } from '../components/ChatMessage';
 import { DateSeparator } from '../components/DateSeparator';
@@ -29,19 +36,18 @@ import { useChat } from '../hooks/useChat';
 import { useGroup } from '../hooks/useGroups';
 import { setActiveConversation } from '../navigation/navigationRef';
 import { syncGroupAccess } from '../services/groupService';
-import { useThemedStyles } from '../theme/ThemeContext';
-import { layout, spacing, type Theme } from '../theme/theme';
 import type { DisplayMessage } from '../types/chat';
 import type { ScreenProps } from '../types/navigation';
 import type { ChatUser, PublicProfile } from '../types/user';
 import { otherParticipant } from '../utils/conversationId';
 import { availableSlots } from '../utils/groupValidation';
+import { dropIn, fadeIn, fadeOut } from '../lib/motion';
+import { isCupertino } from '../lib/platform';
 import { buildChatRows, type ChatRow } from '../utils/messageRows';
 
 const SCROLL_BUTTON_THRESHOLD = 240;
 
 const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigation, route, me }) => {
-  const styles = useThemedStyles(createStyles);
   const insets = useSafeAreaInsets();
   const { conversationId, conversationType } = route.params;
   const isGroup: boolean = conversationType === 'group';
@@ -91,6 +97,21 @@ const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigat
       show.remove();
       hide.remove();
     };
+  }, []);
+
+  // iOS: the header floats over the thread (messages scroll under its glass),
+  // so the list reserves its measured height as visual top padding.
+  const [headerHeight, setHeaderHeight] = useState<number>(insets.top + 56);
+  const handleHeaderLayout = useCallback((event: LayoutChangeEvent): void => {
+    setHeaderHeight(Math.round(event.nativeEvent.layout.height));
+  }, []);
+  const overlayTop: number = isCupertino ? headerHeight : 0;
+
+  // The composer floats too (Telegram iOS 26): the thread runs under its
+  // glass down to the screen edge, and the list keeps its height clear.
+  const [composerHeight, setComposerHeight] = useState<number>(insets.bottom + 56);
+  const handleComposerLayout = useCallback((event: LayoutChangeEvent): void => {
+    setComposerHeight(Math.round(event.nativeEvent.layout.height));
   }, []);
 
   const listRef = useRef<FlatList<ChatRow<DisplayMessage>>>(null);
@@ -148,16 +169,28 @@ const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigat
     }
   }, [isGroup, navigation, conversationId, otherUid]);
 
-  const title: string = isGroup ? (group?.name ?? (groupLoading ? 'Carregando...' : 'Grupo')) : (other?.name ?? 'Conversa');
+  const title: string = isGroup
+    ? (group?.name ?? (groupLoading ? 'Carregando...' : 'Grupo'))
+    : (other?.name ?? 'Conversa');
   const subtitle: string = isGroup
     ? group !== null
-      ? `${group.memberIds.length} integrantes${availableSlots(group.memberLimit, group.memberIds.length) === 0 ? ' · grupo cheio' : ''} · toque para ver`
+      ? `${group.memberIds.length} integrantes${availableSlots(group.memberLimit, group.memberIds.length) === 0 ? ' · grupo cheio' : ''}`
       : ''
     : 'Toque para ver o perfil';
 
   const removed: boolean = isGroup && (groupUnavailable || (!groupLoading && group !== null && !amMember));
+  const overlayBottom: number = isCupertino && !removed ? composerHeight : 0;
 
   const renderBody = (): React.ReactElement => {
+    const state = renderState();
+    return state === null ? (
+      renderList()
+    ) : (
+      <View style={{ flex: 1, paddingTop: overlayTop, paddingBottom: overlayBottom }}>{state}</View>
+    );
+  };
+
+  const renderState = (): React.ReactElement | null => {
     if (removed) {
       return (
         <EmptyState
@@ -172,7 +205,7 @@ const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigat
     }
     if (error !== null) {
       return (
-        <View style={styles.padded}>
+        <View className="p-4">
           <ErrorMessage message={error} onRetry={retry} />
         </View>
       );
@@ -182,18 +215,34 @@ const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigat
         <EmptyState
           variant="messages"
           title="Nenhuma mensagem ainda"
-          description={isGroup ? 'Envie a primeira mensagem para o grupo.' : `Envie a primeira mensagem para ${other?.name ?? 'esta pessoa'}.`}
+          description={
+            isGroup
+              ? 'Envie a primeira mensagem para o grupo.'
+              : `Envie a primeira mensagem para ${other?.name ?? 'esta pessoa'}.`
+          }
         />
       );
     }
-    return (
+    return null;
+  };
+
+  const renderList = (): React.ReactElement => (
+    <Animated.View entering={fadeIn} className="flex-1">
       <FlatList
         ref={listRef}
         data={rows}
         keyExtractor={(row: ChatRow<DisplayMessage>) => row.key}
         renderItem={renderItem}
         inverted
-        contentContainerStyle={styles.listContent}
+        // Inverted: paddingBottom is the visual top (clear of the floating
+        // header) and paddingTop the visual bottom (clear of the composer).
+        contentContainerStyle={{
+          paddingHorizontal: 8,
+          paddingTop: overlayBottom + 12,
+          paddingBottom: overlayTop + 12,
+        }}
+        // Keep the scroll indicator inside the visible band, too.
+        scrollIndicatorInsets={{ top: overlayBottom, bottom: overlayTop }}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
@@ -203,48 +252,101 @@ const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigat
         windowSize={11}
         showsVerticalScrollIndicator={false}
       />
-    );
-  };
+    </Animated.View>
+  );
+
+  const header = (
+    <ScreenHeader
+      title={title}
+      subtitle={subtitle}
+      onBack={navigation.goBack}
+      onTitlePress={removed ? undefined : openDetails}
+      titleAccessibilityLabel={isGroup ? `Ver integrantes de ${title}` : `Ver perfil de ${title}`}
+      floating={isCupertino}
+      onLayout={isCupertino ? handleHeaderLayout : undefined}
+      leading={
+        <Avatar
+          name={title}
+          uid={otherUid ?? conversationId}
+          photoUrl={isGroup ? (group?.photoUrl ?? '') : (other?.photoUrl ?? '')}
+          variant={isGroup ? 'group' : 'person'}
+          size={isCupertino ? 44 : 40}
+        />
+      }
+    />
+  );
+
+  const warning =
+    pushWarning !== null ? (
+      <Animated.View
+        entering={dropIn}
+        exiting={fadeOut}
+        className={
+          isCupertino
+            ? 'bg-card/95 border-border/70 mx-4 mt-1 flex-row items-center gap-2 rounded-2xl border px-3 py-2'
+            : 'bg-warning/10 flex-row items-center gap-2 px-4 py-2'
+        }
+      >
+        <Icon as={BellOff} className="text-warning size-3.5" />
+        <Text className="text-foreground flex-1 text-xs">{pushWarning}</Text>
+        <Pressable
+          onPress={dismissPushWarning}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel="Fechar aviso"
+        >
+          <Icon as={X} className="text-muted-foreground size-3.5" />
+        </Pressable>
+      </Animated.View>
+    ) : null;
+
+  const composer: React.ReactElement | null = removed ? null : (
+    <View
+      className={isCupertino ? 'px-3 pt-2' : 'px-1.5 pt-1.5'}
+      style={{ paddingBottom: keyboardVisible ? 8 : insets.bottom + (isCupertino ? 4 : 8) }}
+      onLayout={isCupertino ? handleComposerLayout : undefined}
+    >
+      <ChatInput onSend={send} disabled={loading || error !== null || !amMember} members={otherMembers} />
+    </View>
+  );
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-      <ScreenHeader
-        title={title}
-        subtitle={subtitle}
-        onBack={navigation.goBack}
-        onTitlePress={removed ? undefined : openDetails}
-        titleAccessibilityLabel={isGroup ? `Ver integrantes de ${title}` : `Ver perfil de ${title}`}
-        leading={
-          <Avatar
-            name={title}
-            uid={otherUid ?? conversationId}
-            photoUrl={isGroup ? (group?.photoUrl ?? '') : (other?.photoUrl ?? '')}
-            variant={isGroup ? 'group' : 'person'}
-            size={layout.avatar.sm + 4}
-          />
-        }
-      />
-      {pushWarning !== null ? (
-        <View style={styles.warning}>
-          <Text style={styles.warningText} onPress={dismissPushWarning}>
-            {pushWarning} (toque para fechar)
-          </Text>
-        </View>
-      ) : null}
-      <View style={styles.body}>
+    <KeyboardAvoidingView className="bg-chat flex-1" behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      {/* One wallpaper behind everything: the bars are glass (iOS) or the
+          composer floats on it directly (WhatsApp Android). */}
+      <Backdrop />
+      {isCupertino ? null : (
+        <>
+          {header}
+          {warning}
+        </>
+      )}
+      {/* Sized by flex, so it shrinks with the keyboard: the floating
+          composer anchors to its bottom edge, not the screen's. */}
+      <View className="flex-1">
         {renderBody()}
         {!loading && error === null && !removed && messages.length > 0 ? (
           <ScrollToLatestButton
             visible={showScrollButton}
+            bottom={overlayBottom + 12}
             onPress={() => listRef.current?.scrollToOffset({ offset: 0, animated: true })}
           />
         ) : null}
+        {composer !== null && isCupertino ? (
+          <View className="absolute inset-x-0 bottom-0" pointerEvents="box-none">
+            <EdgeFade edge="bottom" height={composerHeight + 20} solid={Math.max(composerHeight - 28, 0)} />
+            {composer}
+          </View>
+        ) : null}
       </View>
-      {removed ? null : (
-        <View style={[styles.inputArea, { paddingBottom: keyboardVisible ? spacing.sm : insets.bottom + spacing.sm }]}>
-          <ChatInput onSend={send} disabled={loading || error !== null || !amMember} members={otherMembers} />
+      {isCupertino ? null : composer}
+      {isCupertino ? (
+        <View className="absolute inset-x-0 top-0" pointerEvents="box-none">
+          <EdgeFade height={headerHeight + 20} solid={Math.max(headerHeight - 12, 0)} />
+          {header}
+          {warning}
         </View>
-      )}
+      ) : null}
     </KeyboardAvoidingView>
   );
 };
@@ -253,22 +355,5 @@ export const ChatScreen: React.FC<ScreenProps<'Chat'>> = (props) => {
   const { user } = useAuth();
   return user === null ? null : <ChatContent {...props} me={user} />;
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.chatBackground },
-    body: { flex: 1 },
-    padded: { padding: spacing.md },
-    listContent: { paddingHorizontal: spacing.sm + spacing.xs, paddingVertical: spacing.md },
-    warning: { backgroundColor: colors.dangerSurface, paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
-    warningText: { fontSize: 12, color: colors.dangerText },
-    inputArea: {
-      paddingHorizontal: spacing.sm,
-      paddingTop: spacing.sm,
-      backgroundColor: colors.surface,
-      borderTopWidth: layout.hairline,
-      borderTopColor: colors.separator,
-    },
-  });
 
 export default ChatScreen;

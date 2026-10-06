@@ -1,21 +1,26 @@
 import React, { useCallback, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { View } from 'react-native';
 
 import { TabBar, type HomeTab } from '../components/TabBar';
 import { useAuth } from '../hooks/useAuth';
 import { useConversations } from '../hooks/useConversations';
-import { useThemedStyles } from '../theme/ThemeContext';
-import type { Theme } from '../theme/theme';
+import { cn } from '../lib/utils';
 import type { ConversationSummary } from '../types/chat';
 import type { ScreenProps } from '../types/navigation';
 import type { ChatUser } from '../types/user';
 import { ConversationsScreen } from './ConversationsScreen';
 import { SettingsScreen } from './SettingsScreen';
 
-/** Two tabs behind a floating bar: the conversation list and "Você". Both
- * stay mounted so scroll position and drafts survive switching. */
+/**
+ * A tab's content. Stays mounted while hidden (scroll position and drafts
+ * survive switching) and swaps instantly, like native tab bars do.
+ */
+const TabPane: React.FC<{ active: boolean; children: React.ReactNode }> = ({ active, children }) => (
+  <View className={cn('flex-1', !active && 'hidden')}>{children}</View>
+);
+
+/** Two tabs behind a floating bar: the conversation list and "Você". */
 const HomeContent: React.FC<ScreenProps<'Home'> & { me: ChatUser }> = ({ navigation, me }) => {
-  const styles = useThemedStyles(createStyles);
   const [tab, setTab] = useState<HomeTab>('chats');
   const { conversations, loading, error, reload, unreadTotal } = useConversations(me);
 
@@ -29,8 +34,8 @@ const HomeContent: React.FC<ScreenProps<'Home'> & { me: ChatUser }> = ({ navigat
   const newGroup = useCallback((): void => navigation.navigate('GroupForm'), [navigation]);
 
   return (
-    <View style={styles.container}>
-      <View style={[styles.fill, tab === 'chats' ? null : styles.hidden]}>
+    <View className="bg-background flex-1">
+      <TabPane active={tab === 'chats'}>
         <ConversationsScreen
           meUid={me.uid}
           conversations={conversations}
@@ -41,10 +46,10 @@ const HomeContent: React.FC<ScreenProps<'Home'> & { me: ChatUser }> = ({ navigat
           onNewDirect={newDirect}
           onNewGroup={newGroup}
         />
-      </View>
-      <View style={[styles.fill, tab === 'you' ? null : styles.hidden]}>
+      </TabPane>
+      <TabPane active={tab === 'you'}>
         <SettingsScreen me={me} />
-      </View>
+      </TabPane>
       <TabBar active={tab} onChange={setTab} me={me} unreadTotal={unreadTotal} />
     </View>
   );
@@ -54,12 +59,5 @@ export const HomeScreen: React.FC<ScreenProps<'Home'>> = (props) => {
   const { user } = useAuth();
   return user === null ? null : <HomeContent {...props} me={user} />;
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    container: { flex: 1, backgroundColor: colors.background },
-    fill: { flex: 1 },
-    hidden: { display: 'none' },
-  });
 
 export default HomeScreen;

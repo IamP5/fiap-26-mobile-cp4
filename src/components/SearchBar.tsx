@@ -1,9 +1,15 @@
+import { Search, X } from 'lucide-react-native';
 import React from 'react';
-import { Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { Pressable, TextInput, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { androidRipple, interaction, maxFontScale, radius, spacing, type Theme } from '../theme/theme';
-import { Icon } from './Icon';
+import { Icon } from '@/components/ui/icon';
+import { haptics } from '@/lib/haptics';
+import { popIn, popOut } from '@/lib/motion';
+import { isMaterial } from '@/lib/platform';
+import { cn } from '@/lib/utils';
+import { useThemeColors } from '@/theme/ThemeContext';
+import { maxFontScale } from '@/theme/theme';
 
 export type SearchBarProps = {
   value: string;
@@ -11,81 +17,60 @@ export type SearchBarProps = {
   placeholder?: string;
 };
 
-// Telegram-style search pill: sunken surface, magnifier on the left, and a
-// clear affordance that only exists while there is something to clear.
-export const SearchBar: React.FC<SearchBarProps> = ({
-  value,
-  onChangeText,
-  placeholder = 'Pesquisar',
-}: SearchBarProps) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
-
-  const handleClear = (): void => {
-    onChangeText('');
-  };
+/**
+ * Platform search field: the iOS 26 capsule (Telegram) or the Material 3
+ * search bar (WhatsApp) — a filled pill, no outline or focus ring. The clear
+ * button appears once there is text.
+ */
+export const SearchBar: React.FC<SearchBarProps> = ({ value, onChangeText, placeholder = 'Pesquisar' }) => {
+  const colors = useThemeColors();
+  const hasValue: boolean = value.length > 0;
 
   return (
-    <View style={styles.pill}>
-      <Icon name="search" color={colors.muted} size={16} />
+    <View
+      className={cn(
+        'bg-muted flex-row items-center rounded-full',
+        isMaterial ? 'h-12 gap-3 pl-4 pr-3' : 'h-10 gap-2 pl-3 pr-2',
+      )}
+    >
+      <Icon as={Search} className={cn('text-muted-foreground', isMaterial ? 'size-5' : 'size-[18px]')} />
       <TextInput
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor={colors.muted}
-        style={styles.input}
+        placeholderTextColor={colors.mutedForeground}
+        className={cn('text-foreground h-full flex-1 web:outline-none', isMaterial ? 'text-base' : 'text-[16px]')}
         autoCapitalize="none"
         autoCorrect={false}
         returnKeyType="search"
-        accessibilityLabel="Pesquisar contatos"
+        accessibilityLabel={placeholder}
         maxFontSizeMultiplier={maxFontScale.chrome}
       />
-      {value.length > 0 ? (
-        <Pressable
-          onPress={handleClear}
-          accessibilityRole="button"
-          accessibilityLabel="Limpar pesquisa"
-          android_ripple={androidRipple(colors.ripple, true)}
-          hitSlop={spacing.sm}
-          style={({ pressed }: { pressed: boolean }) => [
-            styles.clearButton,
-            pressed ? styles.clearPressed : null,
-          ]}
-        >
-          <Icon name="close" color={colors.muted} size={14} />
-        </Pressable>
+      {hasValue ? (
+        <Animated.View entering={popIn} exiting={popOut}>
+          <Pressable
+            onPress={() => {
+              haptics.tap();
+              onChangeText('');
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Limpar pesquisa"
+            hitSlop={8}
+            className={cn(
+              'items-center justify-center rounded-full active:opacity-60',
+              isMaterial ? 'size-6' : 'bg-muted-foreground/40 size-[18px]',
+            )}
+          >
+            <Icon
+              as={X}
+              strokeWidth={isMaterial ? 2 : 3}
+              className={cn(isMaterial ? 'text-muted-foreground size-5' : 'text-background size-3')}
+            />
+          </Pressable>
+        </Animated.View>
       ) : null}
     </View>
   );
 };
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    pill: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      minHeight: 40,
-      borderRadius: radius.pill,
-      backgroundColor: colors.surfaceSunken,
-      paddingHorizontal: spacing.md - spacing.xs,
-      gap: spacing.sm,
-    },
-    input: {
-      flex: 1,
-      paddingVertical: spacing.sm,
-      fontSize: 16,
-      color: colors.text,
-    },
-    clearButton: {
-      alignItems: 'center',
-      justifyContent: 'center',
-      width: 24,
-      height: 24,
-      borderRadius: radius.pill,
-    },
-    clearPressed: {
-      opacity: interaction.pressedOpacity,
-    },
-  });
 
 export default SearchBar;

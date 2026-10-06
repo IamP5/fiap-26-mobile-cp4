@@ -1,9 +1,11 @@
-import React, { useEffect, useRef } from 'react';
-import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
+import { CircleAlert, RotateCw, X } from 'lucide-react-native';
+import React from 'react';
+import { Pressable, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
-import { useTheme, useThemedStyles } from '../theme/ThemeContext';
-import { interaction, layout, spacing, type Theme } from '../theme/theme';
-import { Icon } from './Icon';
+import { PressableScale } from '@/components/motion/PressableScale';
+import { Icon } from '@/components/ui/icon';
+import { fadeOut, riseIn } from '@/lib/motion';
 
 export type ErrorMessageProps = {
   message: string;
@@ -11,137 +13,42 @@ export type ErrorMessageProps = {
   onDismiss?: () => void;
 };
 
-export const ErrorMessage: React.FC<ErrorMessageProps> = ({
-  message,
-  onRetry,
-  onDismiss,
-}: ErrorMessageProps) => {
-  const { colors } = useTheme();
-  const styles = useThemedStyles(createStyles);
-  const progress = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(progress, {
-      toValue: 1,
-      duration: interaction.duration.banner,
-      useNativeDriver: true,
-    }).start();
-  }, [progress]);
-
-  const animatedStyle = {
-    opacity: progress,
-    transform: [
-      {
-        translateY: progress.interpolate({
-          inputRange: [0, 1],
-          outputRange: [-8, 0],
-        }),
-      },
-    ],
-  };
-
-  return (
-    <Animated.View
-      style={[styles.card, animatedStyle]}
-      accessibilityRole="alert"
-      accessibilityLiveRegion="polite"
-    >
-      <View style={styles.row}>
-        <View style={styles.iconCircle}>
-          <Icon name="alert" size={14} color={colors.dangerSurface} />
-        </View>
-        <Text style={styles.message}>{message}</Text>
-        {onDismiss !== undefined ? (
-          <Pressable
-            onPress={onDismiss}
-            accessibilityRole="button"
-            accessibilityLabel="Fechar aviso"
-            hitSlop={8}
-            style={({ pressed }: { pressed: boolean }) => [
-              styles.dismissButton,
-              pressed ? styles.dismissButtonPressed : null,
-            ]}
-          >
-            <Icon name="close" size={14} color={colors.dangerText} />
-          </Pressable>
-        ) : null}
-      </View>
-      {onRetry !== undefined ? (
+/** shadcn "Alert" (destructive) with optional retry / dismiss. */
+export const ErrorMessage: React.FC<ErrorMessageProps> = ({ message, onRetry, onDismiss }) => (
+  <Animated.View
+    entering={riseIn}
+    exiting={fadeOut}
+    className="border-destructive/25 bg-destructive/8 my-2 gap-3 rounded-xl border p-3.5"
+    accessibilityRole="alert"
+    accessibilityLiveRegion="polite"
+  >
+    <View className="flex-row items-start gap-2.5">
+      <Icon as={CircleAlert} className="text-destructive mt-0.5 size-4" />
+      <Text className="text-foreground flex-1 text-sm leading-5">{message}</Text>
+      {onDismiss !== undefined ? (
         <Pressable
-          onPress={onRetry}
+          onPress={onDismiss}
+          hitSlop={10}
           accessibilityRole="button"
-          accessibilityLabel="Tentar novamente"
-          style={({ pressed }: { pressed: boolean }) => [
-            styles.retryButton,
-            pressed ? styles.retryButtonPressed : null,
-          ]}
+          accessibilityLabel="Fechar aviso"
+          className="size-5 items-center justify-center rounded-full active:bg-accent"
         >
-          <Text style={styles.retryLabel}>Tentar novamente</Text>
+          <Icon as={X} className="text-muted-foreground size-3.5" />
         </Pressable>
       ) : null}
-    </Animated.View>
-  );
-};
-
-const createStyles = ({ colors }: Theme) =>
-  StyleSheet.create({
-    card: {
-      backgroundColor: colors.dangerSurface,
-      borderWidth: 1,
-      borderColor: colors.dangerBorder,
-      borderRadius: 14,
-      padding: spacing.md,
-      marginVertical: spacing.sm,
-    },
-    row: {
-      flexDirection: 'row',
-      alignItems: 'flex-start',
-    },
-    iconCircle: {
-      width: 22,
-      height: 22,
-      borderRadius: 11,
-      backgroundColor: colors.danger,
-      alignItems: 'center',
-      justifyContent: 'center',
-      marginRight: spacing.sm,
-    },
-    message: {
-      flex: 1,
-      color: colors.dangerText,
-      fontSize: 14,
-      lineHeight: 20,
-    },
-    dismissButton: {
-      width: layout.touchTarget,
-      height: layout.touchTarget,
-      marginTop: -(layout.touchTarget - 22) / 2,
-      marginRight: -(layout.touchTarget - 22) / 2,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    dismissButtonPressed: {
-      opacity: interaction.pressedOpacity,
-    },
-    retryButton: {
-      alignSelf: 'flex-start',
-      marginTop: spacing.md,
-      minHeight: layout.touchTarget,
-      paddingVertical: spacing.sm,
-      paddingHorizontal: spacing.md,
-      borderRadius: 10,
-      backgroundColor: colors.danger,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    retryButtonPressed: {
-      opacity: interaction.pressedOpacityFilled,
-    },
-    retryLabel: {
-      color: colors.dangerSurface,
-      fontSize: 14,
-      fontWeight: '600',
-    },
-  });
+    </View>
+    {onRetry !== undefined ? (
+      <PressableScale
+        onPress={onRetry}
+        accessibilityRole="button"
+        accessibilityLabel="Tentar novamente"
+        className="border-border bg-background h-8 flex-row items-center gap-1.5 self-start rounded-lg border px-3 active:bg-accent"
+      >
+        <Icon as={RotateCw} className="text-foreground size-3.5" />
+        <Text className="text-foreground text-[13px] font-medium">Tentar novamente</Text>
+      </PressableScale>
+    ) : null}
+  </Animated.View>
+);
 
 export default ErrorMessage;

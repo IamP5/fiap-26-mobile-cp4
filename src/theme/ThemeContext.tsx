@@ -4,10 +4,12 @@ import React, {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
 } from 'react';
 import { useColorScheme } from 'react-native';
+import { Uniwind } from 'uniwind';
 
 import { buildTheme, type ColorScheme, type Theme, type ThemeColors } from './theme';
 
@@ -65,6 +67,12 @@ export const ThemeProvider: React.FC<ThemeProviderProps> = ({ children }) => {
 
   const scheme: ColorScheme = preference === 'system' ? systemScheme : preference;
 
+  // Uniwind resolves every `dark:`/token className from its own theme state;
+  // keep it locked to the scheme we resolved so className and JS colors agree.
+  useLayoutEffect(() => {
+    Uniwind.setTheme(scheme);
+  }, [scheme]);
+
   const value = useMemo<ThemeContextValue>(
     () => ({ theme: buildTheme(scheme), scheme, preference, setPreference }),
     [scheme, preference, setPreference],
@@ -85,12 +93,3 @@ export const useThemeContext = (): ThemeContextValue => {
 export const useTheme = (): Theme => useThemeContext().theme;
 
 export const useThemeColors = (): ThemeColors => useThemeContext().theme.colors;
-
-/**
- * Memoized themed StyleSheet: `factory` must be module-scope stable so the
- * styles are only rebuilt when the scheme actually flips.
- */
-export const useThemedStyles = <T,>(factory: (theme: Theme) => T): T => {
-  const theme: Theme = useTheme();
-  return useMemo((): T => factory(theme), [factory, theme]);
-};
