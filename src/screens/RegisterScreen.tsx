@@ -14,7 +14,7 @@ import { isValidEmail, maskDate, maskPhone, normalizePhone, parseBirthDate } fro
 import { haptics } from '@/lib/haptics';
 import { fadeOut, layout, riseIn } from '@/lib/motion';
 
-type FieldErrors = Partial<Record<'name' | 'email' | 'phone' | 'birthDate' | 'password' | 'confirm', string>>;
+type FieldErrors = Partial<Record<'photo' | 'name' | 'email' | 'phone' | 'birthDate' | 'password' | 'confirm', string>>;
 
 const MIN_PASSWORD = 6;
 
@@ -37,6 +37,9 @@ export const RegisterScreen: React.FC<ScreenProps<'Register'>> = ({ navigation }
     clearError();
     setFormError(null);
     const errors: FieldErrors = {};
+    if (photo === null) {
+      errors.photo = 'Escolha uma foto de perfil.';
+    }
     if (name.trim().length === 0) {
       errors.name = 'Informe seu nome.';
     } else if (name.trim().length > 80) {
@@ -104,6 +107,7 @@ export const RegisterScreen: React.FC<ScreenProps<'Register'>> = ({ navigation }
         onError={setFormError}
         disabled={loading}
         label={photo === null ? 'Adicionar foto de perfil' : 'Trocar foto'}
+        error={photo === null ? fieldErrors.photo : undefined}
       />
       <TextField label="Nome" value={name} onChangeText={setName} placeholder="Seu nome completo" autoCapitalize="words" editable={!loading} error={fieldErrors.name} />
       <TextField label="E-mail" value={email} onChangeText={setEmail} placeholder="voce@exemplo.com" keyboardType="email-address" editable={!loading} error={fieldErrors.email} />

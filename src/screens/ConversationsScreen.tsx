@@ -1,6 +1,6 @@
-import { MessageSquarePlus, SquarePen, UsersRound } from 'lucide-react-native';
+import { LogOut, MessageSquarePlus, SquarePen, UsersRound } from 'lucide-react-native';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { type ListRenderItemInfo, Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, type ListRenderItemInfo, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -15,6 +15,7 @@ import { tabBarClearance, tabBarFabOffset } from '../components/TabBar';
 import { Icon } from '../components/ui/icon';
 import { UserItemSkeleton } from '../components/UserItemSkeleton';
 import { profileOrFallback, useDirectory } from '../contexts/DirectoryContext';
+import { useAuth } from '../hooks/useAuth';
 import { haptics } from '../lib/haptics';
 import { fadeIn, layout, listItemEnter } from '../lib/motion';
 import { isMaterial } from '../lib/platform';
@@ -130,7 +131,20 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
 }) => {
   const insets = useSafeAreaInsets();
   const { byUid } = useDirectory();
+  const { signOut } = useAuth();
   const [query, setQuery] = useState<string>('');
+
+  const confirmSignOut = useCallback((): void => {
+    haptics.tap();
+    if (Platform.OS === 'web') {
+      void signOut();
+      return;
+    }
+    Alert.alert('Sair da conta?', 'Você deixará de receber notificações neste aparelho.', [
+      { text: 'Cancelar', style: 'cancel' },
+      { text: 'Sair', style: 'destructive', onPress: () => void signOut() },
+    ]);
+  }, [signOut]);
   const [filter, setFilter] = useState<Filter>('all');
 
   const visible = useMemo<ConversationSummary[]>(
@@ -234,7 +248,10 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
           <Text className="text-foreground text-[22px] font-semibold" accessibilityRole="header">
             Conversas
           </Text>
-          <IconButton icon={UsersRound} onPress={onNewGroup} accessibilityLabel="Criar grupo" />
+          <View className="flex-row items-center">
+            <IconButton icon={UsersRound} onPress={onNewGroup} accessibilityLabel="Criar grupo" />
+            <IconButton icon={LogOut} onPress={confirmSignOut} accessibilityLabel="Sair da conta" />
+          </View>
         </View>
       ) : (
         // iOS 26: large title with Liquid Glass actions on the same line.
@@ -250,6 +267,7 @@ export const ConversationsScreen: React.FC<ConversationsScreenProps> = ({
               onPress={onNewDirect}
               accessibilityLabel="Nova conversa individual"
             />
+            <IconButton icon={LogOut} variant="glass" onPress={confirmSignOut} accessibilityLabel="Sair da conta" />
           </View>
         </View>
       )}

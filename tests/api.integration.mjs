@@ -208,7 +208,10 @@ describe('groups', () => {
     group = { id: group.id, ...snapshot.data() };
     assert.equal(group.memberIds.length, 4);
     const mirror = await get(ref(alice.database, `groupMembers/${group.id}`));
-    assert.deepEqual(Object.keys(mirror.val()).sort(), [...group.memberIds].sort());
+    // `_v` is the mirror's version stamp (group updatedAt), not a member.
+    const mirrored = Object.keys(mirror.val()).filter((key) => key !== '_v');
+    assert.deepEqual(mirrored.sort(), [...group.memberIds].sort());
+    assert.equal(mirror.val()._v, group.updatedAt);
   });
 
   test('the limit cannot drop below the current member count', async () => {

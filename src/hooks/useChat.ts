@@ -193,6 +193,7 @@ export const useChat = (
 
   const attemptSend = useCallback(
     (localId: string, message: OutgoingMessage, existingId?: string): void => {
+      let messageId: string | undefined = existingId;
       sendMessage({
         conversationId,
         conversationType,
@@ -200,6 +201,7 @@ export const useChat = (
         message,
         existingId,
         onLocalId: (id: string) => {
+          messageId = id;
           if (mountedRef.current) {
             setPending((prev: PendingEntry[]) =>
               prev.map((p: PendingEntry) => (p.localId === localId ? { ...p, serverId: id } : p)),
@@ -207,7 +209,15 @@ export const useChat = (
           }
         },
         onDeadlineExceededSettled: (delivered: boolean) => {
-          if (mountedRef.current && delivered) {
+          if (!delivered) {
+            return;
+          }
+          // The write landed after the deadline: it is persisted, so the
+          // push is still owed (the API dedupes if a retry also asks).
+          if (messageId !== undefined) {
+            notifyServer(messageId);
+          }
+          if (mountedRef.current) {
             setPending((prev: PendingEntry[]) => prev.filter((p: PendingEntry) => p.localId !== localId));
           }
         },

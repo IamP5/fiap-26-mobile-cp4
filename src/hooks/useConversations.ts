@@ -34,16 +34,33 @@ export const useConversations = (me: ChatUser): UseConversationsResult => {
   const [directs, setDirects] = useState<DirectConversation[] | null>(null);
   const [groups, setGroups] = useState<ChatGroup[] | null>(null);
   const [channels, setChannels] = useState<Record<string, Channel>>({});
-  const [error, setError] = useState<string | null>(null);
+  // One slot per listener: a later good snapshot clears only its own error.
+  const [directsError, setDirectsError] = useState<string | null>(null);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const error: string | null = directsError ?? groupsError;
   const [reloadToken, setReloadToken] = useState<number>(0);
 
   const meUid: string = me.uid;
 
   useEffect(() => {
-    setError(null);
-    const onError = (subscriptionError: unknown): void => setError(translateFirebaseError(subscriptionError));
-    const stopDirects = subscribeToDirectConversations(meUid, setDirects, onError);
-    const stopGroups = subscribeToMyGroups(meUid, setGroups, onError);
+    setDirectsError(null);
+    setGroupsError(null);
+    const stopDirects = subscribeToDirectConversations(
+      meUid,
+      (next: DirectConversation[]): void => {
+        setDirects(next);
+        setDirectsError(null);
+      },
+      (subscriptionError: unknown): void => setDirectsError(translateFirebaseError(subscriptionError)),
+    );
+    const stopGroups = subscribeToMyGroups(
+      meUid,
+      (next: ChatGroup[]): void => {
+        setGroups(next);
+        setGroupsError(null);
+      },
+      (subscriptionError: unknown): void => setGroupsError(translateFirebaseError(subscriptionError)),
+    );
     return () => {
       stopDirects();
       stopGroups();

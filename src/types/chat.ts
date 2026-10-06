@@ -1,5 +1,11 @@
 export type ConversationType = 'direct' | 'group';
 
+/** Firestore shape of directConversations/{id} (the id holds the pair). */
+export type StoredDirectConversation = {
+  participantIds: [string, string];
+  createdAt: number;
+};
+
 export type DirectConversation = {
   id: string;
   type: 'direct';

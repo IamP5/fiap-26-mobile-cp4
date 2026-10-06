@@ -20,9 +20,17 @@ const devicePlatform = (): DevicePlatform | null =>
 
 const deviceRef = async (uid: string) => doc(firestore, 'users', uid, 'devices', await getDeviceId());
 
+/**
+ * Logout guard: once a user starts signing out, their token-refresh listeners
+ * are stopped and no late registration may write the device document again
+ * (deleting the FCM token can mint a new one and fire onTokenRefresh).
+ */
+const refreshListeners = new Set<() => void>();
+const signedOutUids = new Set<string>();
+
 const saveToken = async (uid: string, token: string, enabled: boolean): Promise<void> => {
   const platform: DevicePlatform | null = devicePlatform();
-  if (platform === null) {
+  if (platform === null || signedOutUids.has(uid)) {
     return;
   }
   const device: StoredDevice = { token, platform, enabled, updatedAt: Date.now() };
@@ -47,7 +55,18 @@ const storedPreference = async (uid: string): Promise<boolean> => {
 /** FCM registration failures with a cause the user can act on. */
 const describePushError = (error: unknown): string => {
   const raw: string = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  if (raw.includes('apns') || raw.includes('aps-environment') || raw.includes('entitlement')) {
+  const code: unknown = typeof error === 'object' && error !== null && 'code' in error ? error.code : null;
+  // On iOS every FCM registration failure (messaging/*) comes down to APNs:
+  // no APNs token on this device/simulator, or no APNs key in Firebase.
+  const iosMessagingFailure: boolean =
+    Platform.OS === 'ios' && typeof code === 'string' && code.startsWith('messaging/');
+  if (
+    iosMessagingFailure ||
+    raw.includes('apns') ||
+    raw.includes('aps-environment') ||
+    raw.includes('entitlement') ||
+    raw.includes('registered for remote')
+  ) {
     return 'O iPhone não conseguiu se registrar no serviço de push da Apple (APNs). Use um aparelho físico com o app assinado e a chave APNs configurada no Firebase.';
   }
   if (raw.includes('service_not_available') || raw.includes('play services') || raw.includes('missing_instanceid')) {
@@ -57,6 +76,7 @@ const describePushError = (error: unknown): string => {
 };
 
 export const registerDevice = async (uid: string): Promise<PushStatus> => {
+  signedOutUids.delete(uid);
   const availability: PushAvailability = await loadPushApi();
   if (!availability.available) {
     return { state: 'unsupported', reason: availability.reason };
@@ -84,11 +104,18 @@ export const watchTokenRefresh = async (uid: string): Promise<() => void> => {
   if (!availability.available) {
     return () => undefined;
   }
-  return availability.api.onTokenRefresh((token: string) => {
+  const unsubscribe: () => void = availability.api.onTokenRefresh((token: string) => {
     void storedPreference(uid)
       .then((enabled: boolean) => saveToken(uid, token, enabled))
       .catch(() => undefined);
   });
+  const stop = (): void => {
+    if (refreshListeners.delete(stop)) {
+      unsubscribe();
+    }
+  };
+  refreshListeners.add(stop);
+  return stop;
 };
 
 export const setDeviceNotificationsEnabled = async (uid: string, enabled: boolean): Promise<void> => {
@@ -104,6 +131,8 @@ export const setDeviceNotificationsEnabled = async (uid: string, enabled: boolea
  * the previous user never receives pushes on this phone again.
  */
 export const unregisterDevice = async (uid: string): Promise<void> => {
+  signedOutUids.add(uid);
+  [...refreshListeners].forEach((stop: () => void) => stop());
   try {
     await withTimeout(deleteDoc(await deviceRef(uid)), 5000, 'timeout');
   } catch {
@@ -111,7 +140,8 @@ export const unregisterDevice = async (uid: string): Promise<void> => {
   }
   const availability: PushAvailability = await loadPushApi();
   if (availability.available) {
-    await availability.api.deleteToken().catch(() => undefined);
+    // Bounded: an offline logout must never hang on FCM.
+    await withTimeout(availability.api.deleteToken(), 5000, 'timeout').catch(() => undefined);
   }
 };
 

@@ -62,7 +62,7 @@ func (s *Server) ensureRegistered(ctx context.Context, uids []string) error {
 // failing the request: the Firestore change is already committed, and the
 // mirror heals on the next sync or push request.
 func (s *Server) syncMirror(ctx context.Context, g domain.Group) {
-	if err := s.store.SyncGroupMirror(ctx, g.ID, g.MemberIDs); err != nil {
+	if err := s.store.SyncGroupMirror(ctx, g.ID, g.MemberIDs, g.UpdatedAt); err != nil {
 		slog.ErrorContext(ctx, "group mirror sync failed", "group", g.ID, "error", err.Error())
 	}
 }
@@ -323,7 +323,7 @@ func (s *Server) syncGroup(w http.ResponseWriter, r *http.Request) error {
 	if !g.HasMember(uid) {
 		return httpx.NewError(http.StatusForbidden, "NOT_A_MEMBER", "Você não faz parte deste grupo.")
 	}
-	if err := s.store.SyncGroupMirror(ctx, g.ID, g.MemberIDs); err != nil {
+	if err := s.store.SyncGroupMirror(ctx, g.ID, g.MemberIDs, g.UpdatedAt); err != nil {
 		return err
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "synced"})

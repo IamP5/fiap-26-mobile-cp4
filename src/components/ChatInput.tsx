@@ -123,10 +123,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onSend, disabled = false, 
       if (Platform.OS !== 'web') {
         return;
       }
-      const native = event.nativeEvent as TextInputKeyPressEventData & {
-        shiftKey?: boolean;
-        isComposing?: boolean;
-      };
+      // react-native-web forwards the DOM keyboard flags on nativeEvent.
+      const native: TextInputKeyPressEventData & { shiftKey?: boolean; isComposing?: boolean } = event.nativeEvent;
       if (native.key === 'Enter' && native.shiftKey !== true && native.isComposing !== true) {
         event.preventDefault();
         handleSend();

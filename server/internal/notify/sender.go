@@ -60,6 +60,8 @@ func body(c Content, reason Reason) string {
 // Send delivers one notification per device of each recipient, grouping
 // devices by notification copy so every copy goes out as few multicasts as
 // possible. Tokens that FCM reports as unregistered or malformed are deleted.
+// On error the returned Result still counts what was already delivered, so
+// the caller can tell a total failure (safe to retry) from a partial one.
 func Send(ctx context.Context, client *messaging.Client, st *store.Store, c Content, recipients []Recipient, devices []store.Device) (Result, error) {
 	reasonByUID := make(map[string]Reason, len(recipients))
 	for _, r := range recipients {
@@ -82,6 +84,9 @@ func Send(ctx context.Context, client *messaging.Client, st *store.Store, c Cont
 			}
 			resp, err := client.SendEachForMulticast(ctx, buildMessage(c, reason, tokens))
 			if err != nil {
+				if derr := st.DeleteDevices(ctx, stale); derr == nil {
+					res.RemovedTokens = len(stale)
+				}
 				return res, err
 			}
 			for i, r := range resp.Responses {

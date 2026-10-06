@@ -14,6 +14,7 @@ import {
   type SignUpInput,
   type SignUpResult,
 } from '../services/authService';
+import { setSessionExpiredHandler } from '../services/apiClient';
 import { auth } from '../services/firebase';
 import { unregisterDevice } from '../services/notificationService';
 import type { ChatUser, PickedImage } from '../types/user';
@@ -158,6 +159,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       setLoading(false);
     }
   }, []);
+
+  useEffect(() => {
+    setSessionExpiredHandler((): void => {
+      void signOut().then((): void => setError('Sua sessão expirou. Entre novamente.'));
+    });
+    return (): void => setSessionExpiredHandler(null);
+  }, [signOut]);
 
   const resetPassword = useCallback(async (email: string): Promise<boolean> => {
     setError(null);

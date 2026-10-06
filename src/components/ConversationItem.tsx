@@ -1,4 +1,4 @@
-import { Check } from 'lucide-react-native';
+import { Check, Users } from 'lucide-react-native';
 import React, { useCallback } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import Animated from 'react-native-reanimated';
@@ -61,6 +61,9 @@ export const ConversationItem: React.FC<ConversationItemProps> = ({ conversation
       />
       <View className="flex-1 gap-0.5 py-3 pr-4">
         <View className="flex-row items-center gap-2">
+          {isGroup ? (
+            <Icon as={Users} strokeWidth={2.25} className="text-muted-foreground -mr-0.5 size-4" accessibilityLabel="Grupo" />
+          ) : null}
           <Text
             className={cn('text-foreground flex-1 text-[16px]', hasUnread ? 'font-semibold' : 'font-medium')}
             numberOfLines={1}

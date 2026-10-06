@@ -25,6 +25,8 @@ export type PhotoPickerProps = {
   disabled?: boolean;
   size?: number;
   label?: string;
+  /** Validation message shown under the label (e.g. a required photo). */
+  error?: string;
 };
 
 /** Avatar with a camera badge: choose from the gallery or take a photo,
@@ -40,6 +42,7 @@ export const PhotoPicker: React.FC<PhotoPickerProps> = ({
   disabled = false,
   size = 96,
   label = 'Escolher foto',
+  error,
 }) => {
   const colors = useThemeColors();
   const [picking, setPicking] = useState<boolean>(false);
@@ -109,6 +112,7 @@ export const PhotoPicker: React.FC<PhotoPickerProps> = ({
         </Animated.View>
       </View>
       <Text className="text-primary mt-3 text-sm font-medium">{label}</Text>
+      {error !== undefined ? <Text className="text-destructive mt-1 text-xs">{error}</Text> : null}
     </PressableScale>
   );
 };

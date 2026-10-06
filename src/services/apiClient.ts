@@ -30,22 +30,21 @@ const parseApiError = (status: number, body: unknown): ApiError => {
 };
 
 /**
- * Sends a request and returns the parsed JSON body (unknown: each service
- * validates the shape it expects). Throws ApiError / AppError with pt-BR
- * messages.
+ * Called when the API rejects the session even with a freshly refreshed ID
+ * token (account disabled, password changed, token revoked). AuthContext
+ * registers a handler that signs out and sends the user back to Login.
  */
-export const apiRequest = async (method: HttpMethod, path: string, body?: object): Promise<unknown> => {
-  const user = auth.currentUser;
-  if (user === null) {
-    throw new ApiError(401, 'UNAUTHENTICATED', 'Sessão expirada. Entre novamente.');
-  }
-  const idToken: string = await user.getIdToken();
+let sessionExpiredHandler: (() => void) | null = null;
 
+export const setSessionExpiredHandler = (handler: (() => void) | null): void => {
+  sessionExpiredHandler = handler;
+};
+
+const send = async (method: HttpMethod, path: string, idToken: string, body?: object): Promise<Response> => {
   const controller = new AbortController();
   const timer = setTimeout((): void => controller.abort(), API_TIMEOUT_MS);
-  let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
+    return await fetch(`${API_URL}${path}`, {
       method,
       headers: {
         Authorization: `Bearer ${idToken}`,
@@ -60,6 +59,36 @@ export const apiRequest = async (method: HttpMethod, path: string, body?: object
       : createAppError('Falha de rede ao falar com o servidor. Verifique sua conexão.');
   } finally {
     clearTimeout(timer);
+  }
+};
+
+/**
+ * Sends a request and returns the parsed JSON body (unknown: each service
+ * validates the shape it expects). Throws ApiError / AppError with pt-BR
+ * messages.
+ */
+export const apiRequest = async (method: HttpMethod, path: string, body?: object): Promise<unknown> => {
+  const user = auth.currentUser;
+  if (user === null) {
+    throw new ApiError(401, 'UNAUTHENTICATED', 'Sessão expirada. Entre novamente.');
+  }
+  let response: Response = await send(method, path, await user.getIdToken(), body);
+  if (response.status === 401) {
+    // One retry with a forced refresh covers a token that expired in flight;
+    // a second 401 means the session itself is no longer valid.
+    let refreshed: string | null = null;
+    try {
+      refreshed = await user.getIdToken(true);
+    } catch {
+      refreshed = null;
+    }
+    if (refreshed !== null) {
+      response = await send(method, path, refreshed, body);
+    }
+    if (refreshed === null || response.status === 401) {
+      sessionExpiredHandler?.();
+      throw new ApiError(401, 'UNAUTHENTICATED', 'Sessão expirada. Entre novamente.');
+    }
   }
 
   if (response.status === 204) {

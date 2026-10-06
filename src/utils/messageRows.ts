@@ -103,11 +103,10 @@ export const buildChatRows = <M extends GroupableMessage>(
   // of the day grouping pass below), then assemble output newest-first.
   const isFirst: boolean[] = new Array<boolean>(count);
   const isLast: boolean[] = new Array<boolean>(count);
-  for (let i = 0; i < count; i += 1) {
-    const curr = messages[i] as M;
+  messages.forEach((curr: M, i: number): void => {
     isFirst[i] = breaksFromOlder(curr, messages[i - 1]);
     isLast[i] = breaksFromNewer(curr, messages[i + 1]);
-  }
+  });
 
   const rows: ChatRow<M>[] = [];
   // Walk oldest-first, emitting a day row right BEFORE the first (oldest)
@@ -115,8 +114,7 @@ export const buildChatRows = <M extends GroupableMessage>(
   // Reversing flips "before the oldest message" into "immediately after the
   // oldest message" in the newest-first output, which is the documented
   // contract (it paints above that message on an inverted FlatList).
-  for (let i = 0; i < count; i += 1) {
-    const msg = messages[i] as M;
+  messages.forEach((msg: M, i: number): void => {
     const prev = messages[i - 1];
     const dayStarts: boolean = prev === undefined || !isSameCalendarDay(msg.createdAt, prev.createdAt);
     if (dayStarts) {
@@ -134,10 +132,10 @@ export const buildChatRows = <M extends GroupableMessage>(
       key: `msg-${msg.id}`,
       message: msg,
       isMine: msg.senderId === myUid,
-      isFirstInGroup: isFirst[i] as boolean,
-      isLastInGroup: isLast[i] as boolean,
+      isFirstInGroup: isFirst[i] === true,
+      isLastInGroup: isLast[i] === true,
     });
-  }
+  });
 
   rows.reverse();
   return rows;

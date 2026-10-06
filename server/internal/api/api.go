@@ -149,7 +149,7 @@ func (s *Server) notifyMessage(w http.ResponseWriter, r *http.Request) error {
 		}
 		// Self-heal the RTDB membership mirror if a previous sync failed.
 		if ok, err := s.store.MirrorMatches(ctx, group.ID, group.MemberIDs); err == nil && !ok {
-			if err := s.store.SyncGroupMirror(ctx, group.ID, group.MemberIDs); err != nil {
+			if err := s.store.SyncGroupMirror(ctx, group.ID, group.MemberIDs, group.UpdatedAt); err != nil {
 				slog.WarnContext(ctx, "mirror heal failed", "group", group.ID, "error", err.Error())
 			}
 		}
@@ -196,8 +196,18 @@ func (s *Server) notifyMessage(w http.ResponseWriter, r *http.Request) error {
 
 	result, err := notify.Send(ctx, s.clients.Messaging, s.store, content, recipients, devices)
 	if err != nil {
-		s.store.ReleaseDispatch(ctx, req.ConversationID, req.MessageID)
-		slog.ErrorContext(ctx, "fcm send failed", "error", err.Error())
+		slog.ErrorContext(ctx, "fcm send failed", "error", err.Error(), "delivered", result.Delivered)
+		if result.Delivered == 0 {
+			// Nothing went out: free the claim so a retry can send.
+			s.store.ReleaseDispatch(ctx, req.ConversationID, req.MessageID)
+		} else {
+			// Some devices already got it: keep the claim, since a retry
+			// would notify them twice.
+			_ = s.store.CompleteDispatch(ctx, req.ConversationID, req.MessageID, map[string]any{
+				"recipients": resp.Recipients, "devices": resp.Devices,
+				"delivered": result.Delivered, "partial": true,
+			})
+		}
 		return httpx.NewError(http.StatusBadGateway, "PUSH_FAILED", "Não foi possível enviar a notificação.")
 	}
 	resp.Delivered, resp.Failed, resp.RemovedTokens = result.Delivered, result.Failed, result.RemovedTokens

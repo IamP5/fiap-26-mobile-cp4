@@ -26,6 +26,7 @@ import type {
   DirectConversation,
   MessageTarget,
   OutgoingMessage,
+  StoredDirectConversation,
   StoredMessage,
 } from '../types/chat';
 import { buildDirectConversationId } from '../utils/conversationId';
@@ -99,7 +100,8 @@ export const ensureDirectConversation = async (meUid: string, otherUid: string):
   const participants: [string, string] = meUid < otherUid ? [meUid, otherUid] : [otherUid, meUid];
   const createdAt: number = Date.now();
   try {
-    await setDoc(conversationRef, { participantIds: participants, createdAt });
+    const stored: StoredDirectConversation = { participantIds: participants, createdAt };
+    await setDoc(conversationRef, stored);
   } catch (error: unknown) {
     const raced = await getDoc(conversationRef);
     const winner = raced.exists() ? parseDirectConversation(conversationId, raced.data()) : null;

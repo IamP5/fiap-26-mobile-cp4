@@ -96,13 +96,17 @@ messages/{conversationId}/{messageId}
   mentionedUserIds: { [uid]: true }      // RTDB não guarda arrays vazios
 
 groupMembers/{groupId}/{uid}: true       // espelho de groups.memberIds, escrito só pela API
+groupMembers/{groupId}/_v: number        // versão do espelho (= updatedAt do grupo)
 readMarks/{conversationId}/{uid}: number // última leitura (contador de não lidas)
 ```
 
 **Por que um espelho de integrantes?** As regras do Realtime Database não conseguem ler o
 Firestore. Para que só integrantes ativos leiam/escrevam mensagens do grupo, a API mantém
 `groupMembers/{groupId}` sincronizado com `groups.memberIds` a cada mudança de integrantes (e
-"auto-cura" o espelho em toda requisição de push). Conversas individuais não precisam de espelho:
+"auto-cura" o espelho em toda requisição de push). Cada escrita do espelho é uma transação que carrega a versão do grupo (`updatedAt`, estritamente
+crescente) e nunca substitui uma versão mais nova. Assim, duas mudanças de integrantes simultâneas
+não deixam o espelho com a lista antiga, mesmo que as sincronizações cheguem fora de ordem.
+Conversas individuais não precisam de espelho:
 o id `uidA_uidB` já diz quem participa.
 
 ### Fotos
@@ -142,7 +146,10 @@ testes):
 - tokens inválidos/expirados (`registration-token-not-registered`, `invalid-argument` do token,
   `sender-id-mismatch`) são **removidos** do Firestore;
 - cada usuário pode desligar o push no próprio aparelho (aba **Você**), o que grava
-  `enabled: false` no documento do dispositivo.
+  `enabled: false` no documento do dispositivo;
+- no **logout** (botão na tela de Conversas ou na aba **Você**), o app para o listener de
+  renovação de token, apaga o documento do dispositivo e invalida o token FCM, então o usuário
+  anterior não recebe mais pushes naquele aparelho.
 
 ### Fluxo
 
@@ -160,8 +167,11 @@ API: valida o token (Admin SDK) → lê a mensagem no RTDB e confere senderId ==
 
 A API **não recebe lista de destinatários** do app. Uma mesma mensagem nunca gera push repetido:
 o primeiro pedido cria `notificationDispatches/{conversationId}:{messageId}` numa transação; os
-seguintes respondem `"status": "duplicate"`. Pedidos para mensagens com mais de 15 minutos são
-recusados.
+seguintes respondem `"status": "duplicate"`. Se o FCM falhar antes de entregar qualquer push, a
+reserva é liberada para uma nova tentativa; se falhar depois de entregar parte, a reserva é mantida
+para ninguém receber a notificação duas vezes. Se a gravação da mensagem demorar e só confirmar
+depois do prazo da interface, o app ainda pede o push. Pedidos para mensagens com mais de 15
+minutos são recusados.
 
 ---
 
@@ -395,18 +405,24 @@ Loading em todas as telas, estados vazios (sem conversas, sem usuários, convers
 busca sem resultado), grupo cheio, usuário removido do grupo, falha de envio (bolha vermelha com
 "toque para tentar de novo", sem duplicar a mensagem), aviso quando o push falha, permissão de
 notificação negada (com atalho para as configurações), aparelho sem token, Expo Go sem FCM,
-banner de **sem conexão** (via `.info/connected`), sessão expirada, credenciais inválidas e erros
+banner de **sem conexão** (via `.info/connected`), sessão expirada (se a API recusar o token
+mesmo após renová-lo, o app encerra a sessão e volta ao login), credenciais inválidas e erros
 do Firebase/API traduzidos para pt-BR sem expor detalhes internos.
 
 ---
 
 ## 🖼️ Prints
 
+Development build no **iOS 26 (simulador iPhone 17 Pro Max)**, com dados de demonstração no Emulator
+Suite e a API local. As mensagens de grupo e a remoção de integrante foram feitas com a tela aberta,
+mostrando a atualização em tempo real. No simulador a aba **Você** explica que não há registro no
+APNs (o push no iOS exige aparelho físico e chave APNs). A evidência de push abaixo é do Android.
+
 | Login | Cadastro | Conversas | Usuários |
 | --- | --- | --- | --- |
 | ![](docs/screenshots/01-login.jpg) | ![](docs/screenshots/02-cadastro.jpg) | ![](docs/screenshots/03-conversas.jpg) | ![](docs/screenshots/04-usuarios.jpg) |
 
-| Chat individual | Perfil | Novo grupo | Seleção com limite |
+| Chat individual | Perfil | Editar grupo | Seleção com limite |
 | --- | --- | --- | --- |
 | ![](docs/screenshots/05-chat-individual.jpg) | ![](docs/screenshots/06-perfil.jpg) | ![](docs/screenshots/07-grupo-form.jpg) | ![](docs/screenshots/08-selecao-limite.jpg) |
 

@@ -6,7 +6,6 @@ import {
   orderBy,
   query,
   writeBatch,
-  type DocumentData,
   type QueryDocumentSnapshot,
 } from 'firebase/firestore';
 
@@ -38,8 +37,8 @@ export const parseChatUser = (uid: string, value: unknown): ChatUser | null => {
   };
 };
 
-const parsePublicProfile = (uid: string, value: DocumentData): PublicProfile | null =>
-  typeof value.name === 'string' && value.name.length > 0
+const parsePublicProfile = (uid: string, value: unknown): PublicProfile | null =>
+  isRecord(value) && typeof value.name === 'string' && value.name.length > 0
     ? { uid, name: value.name, photoUrl: safePhotoUrl(value.photoUrl) }
     : null;
 

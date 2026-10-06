@@ -26,6 +26,8 @@ export const useGroup = (groupId: string | null): UseGroupResult => {
       setLoading(false);
       return undefined;
     }
+    // Never show the previous group's data while the new one loads.
+    setGroup(null);
     setLoading(true);
     setError(null);
     setUnavailable(false);

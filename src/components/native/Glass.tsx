@@ -18,7 +18,9 @@ export type GlassProps = ViewProps & {
 };
 
 // Web has no native material: a blurred translucent fill stands in for glass.
-const webGlass = Platform.OS === 'web' ? ({ backdropFilter: 'blur(20px) saturate(180%)' } as ViewStyle) : null;
+/** react-native-web passes CSS-only properties through to the DOM. */
+type WebViewStyle = ViewStyle & { backdropFilter?: string };
+const webGlass: WebViewStyle | null = Platform.OS === 'web' ? { backdropFilter: 'blur(20px) saturate(180%)' } : null;
 
 /**
  * Liquid Glass surface for floating chrome (bars, capsules, round controls).

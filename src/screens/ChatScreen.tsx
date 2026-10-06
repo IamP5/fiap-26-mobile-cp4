@@ -353,7 +353,11 @@ const ChatContent: React.FC<ScreenProps<'Chat'> & { me: ChatUser }> = ({ navigat
 
 export const ChatScreen: React.FC<ScreenProps<'Chat'>> = (props) => {
   const { user } = useAuth();
-  return user === null ? null : <ChatContent {...props} me={user} />;
+  // Keyed by conversation: a push tap can retarget this mounted screen, and
+  // no per-chat state (composer target, resync flags) may leak across chats.
+  return user === null ? null : (
+    <ChatContent key={props.route.params.conversationId} {...props} me={user} />
+  );
 };
 
 export default ChatScreen;

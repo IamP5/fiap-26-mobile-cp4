@@ -32,7 +32,7 @@ export const avatarColorFor = (uid: string, palette: readonly string[]): string 
     }
   }
   const picked: string | undefined = palette[hash];
-  return picked !== undefined ? picked : (palette[0] as string);
+  return picked ?? palette[0] ?? '#8E8E93';
 };
 
 export type AvatarProps = {
@@ -79,7 +79,7 @@ export const Avatar: React.FC<AvatarProps> = ({
     >
       {showPhoto ? (
         <Image
-          source={{ uri: photoUrl as string }}
+          source={{ uri: photoUrl ?? '' }}
           style={dimension}
           onError={handlePhotoError}
           accessibilityIgnoresInvertColors

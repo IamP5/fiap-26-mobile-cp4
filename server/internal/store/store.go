@@ -187,7 +187,9 @@ func (s *Store) MutateGroup(ctx context.Context, id string, fn func(g *domain.Gr
 		if err := fn(&g); err != nil {
 			return err
 		}
-		g.UpdatedAt = nowMillis()
+		// Strictly increasing: updatedAt doubles as the version that orders
+		// writes to the RTDB membership mirror.
+		g.UpdatedAt = max(nowMillis(), g.UpdatedAt+1)
 		result = g
 		return tx.Set(ref, g)
 	})
@@ -199,18 +201,42 @@ func (s *Store) DeleteGroup(ctx context.Context, id string) error {
 	return err
 }
 
+// mirrorVersionKey stores the group's updatedAt next to the member flags.
+// The rules only grant access where groupMembers/{groupId}/{uid} === true,
+// so this numeric entry never authorizes anyone.
+const mirrorVersionKey = "_v"
+
+// errStaleMirror aborts a mirror transaction when a newer version is stored.
+var errStaleMirror = errors.New("stale mirror write")
+
 // SyncGroupMirror writes groupMembers/{groupId} in the Realtime Database, the
 // copy of memberIds that the RTDB rules consult to authorize message reads
 // and writes. Firestore stays the source of truth; the mirror is rewritten
 // after every membership change and on every push request (self-healing).
-func (s *Store) SyncGroupMirror(ctx context.Context, groupID string, memberIDs []string) error {
-	members := make(map[string]bool, len(memberIDs))
+//
+// version is the group's updatedAt. The write is a transaction that refuses
+// to replace a newer version, so two concurrent membership changes can never
+// leave the mirror at the older member list (e.g. re-admitting a removed
+// member) even when their syncs reach the database out of order.
+func (s *Store) SyncGroupMirror(ctx context.Context, groupID string, memberIDs []string, version int64) error {
+	members := make(map[string]any, len(memberIDs)+1)
 	for _, uid := range memberIDs {
 		members[uid] = true
 	}
+	members[mirrorVersionKey] = version
 	var err error
 	for attempt := range 3 {
-		if err = s.db.NewRef("groupMembers/"+groupID).Set(ctx, members); err == nil {
+		err = s.db.NewRef("groupMembers/"+groupID).Transaction(ctx, func(node db.TransactionNode) (any, error) {
+			var current map[string]any
+			if err := node.Unmarshal(&current); err != nil {
+				return nil, err
+			}
+			if stored, ok := current[mirrorVersionKey].(float64); ok && int64(stored) > version {
+				return nil, errStaleMirror
+			}
+			return members, nil
+		})
+		if err == nil || errors.Is(err, errStaleMirror) {
 			return nil
 		}
 		time.Sleep(time.Duration(attempt+1) * 150 * time.Millisecond)
@@ -220,15 +246,16 @@ func (s *Store) SyncGroupMirror(ctx context.Context, groupID string, memberIDs [
 
 // MirrorMatches reports whether the RTDB mirror equals memberIDs.
 func (s *Store) MirrorMatches(ctx context.Context, groupID string, memberIDs []string) (bool, error) {
-	var current map[string]bool
+	var current map[string]any
 	if err := s.db.NewRef("groupMembers/"+groupID).Get(ctx, &current); err != nil {
 		return false, err
 	}
+	delete(current, mirrorVersionKey)
 	if len(current) != len(memberIDs) {
 		return false, nil
 	}
 	for _, uid := range memberIDs {
-		if !current[uid] {
+		if current[uid] != true {
 			return false, nil
 		}
 	}
